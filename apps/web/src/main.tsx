@@ -9,6 +9,7 @@ type RenderedMessage = { id: string; body: string; direction: "mine" | "theirs" 
 type RainSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 
 const defaultPreferences: QueuePreferences = { language: "en", interests: [] };
+const realtimeUrl = import.meta.env.VITE_REALTIME_URL;
 
 function RainLogo({ compact = false }: { compact?: boolean }) {
   return <svg className={compact ? "rain-mark rain-mark--compact" : "rain-mark"} viewBox="0 0 64 64" aria-hidden="true">
@@ -28,7 +29,11 @@ function App() {
   const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
-    const client: RainSocket = io(import.meta.env.VITE_REALTIME_URL ?? "http://localhost:3001", {
+    if (!realtimeUrl && import.meta.env.PROD) {
+      setNotice("Text chat is being set up. Please check back shortly.");
+      return;
+    }
+    const client: RainSocket = io(realtimeUrl ?? "http://localhost:3001", {
       transports: ["websocket"],
       reconnectionAttempts: 5,
     });
