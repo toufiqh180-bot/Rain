@@ -1,10 +1,12 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { createRoot } from "react-dom/client";
 import { io, type Socket } from "socket.io-client";
 import type { ChatMessage, ClientToServerEvents, QueuePreferences, ServerToClientEvents } from "@rain/protocol";
 import "./styles.css";
 
 type AppStatus = "offline" | "ready" | "searching" | "matched" | "peer-left";
+type ChatMode = "text" | "voice";
+type VoiceState = "idle" | "requesting" | "previewing" | "blocked" | "unsupported";
 type RenderedMessage = { id: string; body: string; direction: "mine" | "theirs" };
 type RainSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 
@@ -18,6 +20,81 @@ function RainLogo({ compact = false }: { compact?: boolean }) {
   </svg>;
 }
 
+function MicrophoneIcon({ muted = false }: { muted?: boolean }) {
+  return <svg viewBox="0 0 24 24" aria-hidden="true">
+    <rect x="8.25" y="3" width="7.5" height="11" rx="3.75" />
+    <path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3M8.5 21h7" />
+    {muted && <path className="mic-slash" d="m4 4 16 16" />}
+  </svg>;
+}
+
+function VoiceOrb({ level, muted = false, peer = false }: { level: number; muted?: boolean; peer?: boolean }) {
+  const orbStyle = { "--level": String(muted ? 0 : level) } as CSSProperties;
+  return <div className={`voice-orb ${peer ? "voice-orb--peer" : ""} ${muted ? "voice-orb--muted" : ""}`} style={orbStyle}>
+    <div className="voice-orb__bars" aria-hidden="true">
+      {Array.from({ length: 28 }, (_, index) => <i key={index} style={{ "--bar": String(index) } as CSSProperties} />)}
+    </div>
+    <div className="voice-orb__core"><MicrophoneIcon muted={muted} /></div>
+  </div>;
+}
+
+function VoiceStage({
+  voiceState,
+  muted,
+  localLevel,
+  peerLevel,
+  onStartPreview,
+  onStopPreview,
+  onToggleMute,
+  onFindMatch,
+}: {
+  voiceState: VoiceState;
+  muted: boolean;
+  localLevel: number;
+  peerLevel: number;
+  onStartPreview: () => void;
+  onStopPreview: () => void;
+  onToggleMute: () => void;
+  onFindMatch: () => void;
+}) {
+  const previewing = voiceState === "previewing";
+  const helper = voiceState === "requesting" ? "Waiting for microphone permission…"
+    : voiceState === "blocked" ? "Microphone access was blocked. Enable it in your browser settings to try again."
+      : voiceState === "unsupported" ? "This browser does not support microphone access."
+        : previewing ? "Your microphone is live. The second ring is a visual preview of a future match."
+          : "Test your microphone now. Voice matching will activate when the voice backend is connected.";
+
+  return <div className="voice-stage">
+    <div className="voice-stage__header">
+      <div><p className="section-label">VOICE CHAT</p><h2>Talk, don’t type.</h2></div>
+      <span className={`voice-state ${previewing ? "voice-state--live" : ""}`}><i /> {previewing ? "Mic preview live" : "Voice beta"}</span>
+    </div>
+    <p className="voice-stage__helper">{helper}</p>
+
+    <div className="voice-room">
+      <div className="voice-person">
+        <VoiceOrb level={localLevel} muted={muted} />
+        <strong>You</strong>
+        <span>{muted ? "Muted" : previewing ? "Listening" : "Mic off"}</span>
+      </div>
+      <div className="voice-room__connection" aria-hidden="true"><span /><i>⌁</i><span /></div>
+      <div className="voice-person">
+        <VoiceOrb level={peerLevel} peer />
+        <strong>Someone new</strong>
+        <span>{previewing ? "Audio visual preview" : "Waiting to match"}</span>
+      </div>
+    </div>
+
+    <div className="voice-controls">
+      {previewing && <button className={`mic-control ${muted ? "mic-control--muted" : ""}`} onClick={onToggleMute} aria-label={muted ? "Unmute microphone" : "Mute microphone"}><MicrophoneIcon muted={muted} /></button>}
+      {previewing ? <button className="secondary" onClick={onStopPreview}>Stop mic preview</button>
+        : <button className="primary" disabled={voiceState === "requesting" || voiceState === "unsupported"} onClick={onStartPreview}>Test your mic <span>◌</span></button>}
+      <button className="voice-match-button" onClick={onFindMatch}>Find a voice match <span>→</span></button>
+    </div>
+    <p className="voice-stage__privacy">Voice is private and one-to-one. You will always see when your microphone is active.</p>
+  </div>;
+}
+
 function App() {
   const socket = useRef<RainSocket | null>(null);
   const [status, setStatus] = useState<AppStatus>("offline");
@@ -27,6 +104,14 @@ function App() {
   const [messages, setMessages] = useState<RenderedMessage[]>([]);
   const [sharedInterests, setSharedInterests] = useState<string[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
+  const [mode, setMode] = useState<ChatMode>("text");
+  const [voiceState, setVoiceState] = useState<VoiceState>("idle");
+  const [muted, setMuted] = useState(false);
+  const [localLevel, setLocalLevel] = useState(0);
+  const [peerLevel, setPeerLevel] = useState(0);
+  const voiceStream = useRef<MediaStream | null>(null);
+  const voiceContext = useRef<AudioContext | null>(null);
+  const voiceAnimation = useRef<number | null>(null);
 
   useEffect(() => {
     if (!realtimeUrl && import.meta.env.PROD) {
@@ -61,6 +146,57 @@ function App() {
     });
     return () => { client.disconnect(); };
   }, []);
+
+  function stopVoicePreview() {
+    if (voiceAnimation.current !== null) cancelAnimationFrame(voiceAnimation.current);
+    voiceAnimation.current = null;
+    voiceStream.current?.getTracks().forEach((track) => track.stop());
+    voiceStream.current = null;
+    void voiceContext.current?.close();
+    voiceContext.current = null;
+    setMuted(false);
+    setLocalLevel(0);
+    setPeerLevel(0);
+    setVoiceState("idle");
+  }
+
+  useEffect(() => () => stopVoicePreview(), []);
+
+  async function startVoicePreview() {
+    if (!navigator.mediaDevices?.getUserMedia) return setVoiceState("unsupported");
+    stopVoicePreview();
+    setVoiceState("requesting");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+      const context = new AudioContext();
+      const analyser = context.createAnalyser();
+      analyser.fftSize = 512;
+      const source = context.createMediaStreamSource(stream);
+      source.connect(analyser);
+      const samples = new Uint8Array(analyser.fftSize);
+      voiceStream.current = stream;
+      voiceContext.current = context;
+      setVoiceState("previewing");
+
+      const sampleLevel = () => {
+        analyser.getByteTimeDomainData(samples);
+        const rms = Math.sqrt(samples.reduce((sum, sample) => sum + ((sample - 128) / 128) ** 2, 0) / samples.length);
+        setLocalLevel(Math.min(1, rms * 6));
+        // This is a visual-only peer signal until the WebRTC/LiveKit track is connected.
+        setPeerLevel(0.12 + Math.max(0, Math.sin(Date.now() / 280)) * 0.24 + Math.max(0, Math.sin(Date.now() / 97)) * 0.1);
+        voiceAnimation.current = requestAnimationFrame(sampleLevel);
+      };
+      sampleLevel();
+    } catch {
+      setVoiceState("blocked");
+    }
+  }
+
+  function toggleMute() {
+    const nextMuted = !muted;
+    voiceStream.current?.getAudioTracks().forEach((track) => { track.enabled = !nextMuted; });
+    setMuted(nextMuted);
+  }
 
   function beginSearch() {
     if (!socket.current?.connected) return setNotice("Connecting to chat… please try again in a moment.");
@@ -126,6 +262,10 @@ function App() {
       <section className="chat-layout" aria-label="Random chat">
         <aside className="match-panel">
           <div>
+            <div className="mode-switch" role="tablist" aria-label="Chat type">
+              <button type="button" role="tab" aria-selected={mode === "text"} className={mode === "text" ? "mode-switch__active" : ""} onClick={() => setMode("text")}>Text</button>
+              <button type="button" role="tab" aria-selected={mode === "voice"} className={mode === "voice" ? "mode-switch__active" : ""} onClick={() => setMode("voice")}>Voice</button>
+            </div>
             <p className="section-label">YOUR MATCH SETTINGS</p>
             <label className="field-label" htmlFor="language">Language</label>
             <select id="language" value={preferences.language} disabled={searching || inChat}
@@ -149,13 +289,16 @@ function App() {
             <p className="fine-print">Selected interests require a shared interest. With none selected, you’ll meet anyone.</p>
           </div>
 
-          <div className="voice-preview">
+          <button type="button" className={`voice-preview ${mode === "voice" ? "voice-preview--active" : ""}`} onClick={() => setMode("voice")}>
             <div className="voice-icon">⌁</div>
             <div><strong>Voice match</strong><p>Coming after text chat. Private WebRTC audio with separate live mic levels.</p></div>
-          </div>
+          </button>
         </aside>
 
-        <div className="conversation">
+        {mode === "voice" ? <VoiceStage voiceState={voiceState} muted={muted} localLevel={localLevel} peerLevel={peerLevel}
+          onStartPreview={startVoicePreview} onStopPreview={stopVoicePreview} onToggleMute={toggleMute}
+          onFindMatch={() => setNotice("Voice matching is ready for the backend. Connect the WebRTC token and match events to activate it.")} />
+          : <div className="conversation">
           <div className="conversation-head">
             <div>
               <p className="section-label">TEXT CHAT</p>
@@ -178,7 +321,7 @@ function App() {
                 : <button className="primary" disabled={status === "offline"} onClick={beginSearch}>{status === "peer-left" ? "Find someone new" : "Start a text chat"} <span>→</span></button>}
             </div>}
           {inChat && <div className="chat-actions"><button className="secondary" onClick={leave}>Leave</button><button className="primary" onClick={next}>Next person <span>→</span></button></div>}
-        </div>
+        </div>}
       </section>
       {notice && <div className="notice" role="status">{notice}<button onClick={() => setNotice(null)} aria-label="Dismiss">×</button></div>}
       <footer>18+ only · Don’t share personal information · <button onClick={() => setNotice("Reporting is available during a conversation. Blocking and persistent account controls belong in the production safety service.")}>Safety</button></footer>
