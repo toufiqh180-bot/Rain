@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { createRoot } from "react-dom/client";
 import { io, type Socket } from "socket.io-client";
 import type { ChatMessage, ClientToServerEvents, QueuePreferences, ServerToClientEvents } from "@rain/protocol";
+import { Analytics } from "@vercel/analytics/react";
 import "./styles.css";
 
 type AppStatus = "offline" | "ready" | "searching" | "matched" | "peer-left";
@@ -245,6 +246,7 @@ function App() {
   const inChat = status === "matched";
 
   return (
+    <>
     <main className="shell">
       <header className="topbar">
         <a className="brand" href="/" aria-label="Rain home"><RainLogo /> <span>rain</span></a>
@@ -326,6 +328,8 @@ function App() {
       {notice && <div className="notice" role="status">{notice}<button onClick={() => setNotice(null)} aria-label="Dismiss">×</button></div>}
       <footer>18+ only · Don’t share personal information · <button onClick={() => setNotice("Reporting is available during a conversation. Blocking and persistent account controls belong in the production safety service.")}>Safety</button></footer>
     </main>
+    <Analytics />
+    </>
   );
 }
 

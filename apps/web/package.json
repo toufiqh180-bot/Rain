@@ -10,9 +10,10 @@
   },
   "dependencies": {
     "@rain/protocol": "workspace:*",
-    "socket.io-client": "^4.8.1",
+    "@vercel/analytics": "^2.0.1",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "socket.io-client": "^4.8.1"
   },
   "devDependencies": {
     "@types/react": "^19.0.8",
