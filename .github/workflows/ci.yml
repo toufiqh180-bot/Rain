@@ -8,6 +8,31 @@ on:
 jobs:
   verify:
     runs-on: ubuntu-latest
+
+    # A real Postgres, not a mock. The API's tests exercise actual SQL,
+    # transactions and constraints — the failures worth catching live there.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: rain
+          POSTGRES_USER: rain
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U rain -d rain"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgres://rain:ci@localhost:5432/rain
+      DATABASE_SSL: disable
+      ALLOWED_ORIGINS: http://localhost:5173
+      STORAGE_DRIVER: local
+      INTERNAL_API_KEY: ci-internal-key-000000000000000000
+
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -17,7 +42,15 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
+
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
+      - name: Apply migrations
+        run: pnpm migrate
       - run: pnpm test
       - run: pnpm build
+
+      # The image is what actually ships, so a broken Dockerfile is a broken
+      # deploy. Build it on every change rather than discovering it at release.
+      - name: Build the API image
+        run: docker build -f apps/api/Dockerfile -t rain-api .

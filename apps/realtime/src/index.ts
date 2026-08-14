@@ -51,12 +51,52 @@ function emitError(socket: RainSocket, code: string, message: string): void {
   socket.emit("queueError", { code, message });
 }
 
+/**
+ * Exchanges the client's short-lived handshake token for an account id.
+ *
+ * The browser never sends its session cookie to this gateway; it asks the API
+ * for a narrow, expiring token and presents that instead. When no introspection
+ * URL is configured the socket stays anonymous — `loadEnvironment` already
+ * refuses that combination in production.
+ */
+async function authenticate(socket: RainSocket, next: (error?: Error) => void): Promise<void> {
+  if (!environment.AUTH_INTROSPECTION_URL) {
+    socket.data.accountId = null;
+    return next();
+  }
+  const token = (socket.handshake.auth as { token?: unknown } | undefined)?.token;
+  if (typeof token !== "string" || token.length === 0) return next(new Error("Missing handshake token"));
+  try {
+    const response = await fetch(environment.AUTH_INTROSPECTION_URL, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json",
+        // Proves to the API that this caller is the gateway, not a browser.
+        "x-internal-key": environment.INTERNAL_API_KEY ?? "",
+      },
+      body: JSON.stringify({ token }),
+      signal: AbortSignal.timeout(3_000),
+    });
+    if (!response.ok) return next(new Error("Rejected handshake token"));
+    const payload = (await response.json()) as { accountId?: string; blocked?: boolean };
+    if (!payload.accountId || payload.blocked) return next(new Error("Rejected handshake token"));
+    socket.data.accountId = payload.accountId;
+    return next();
+  } catch (error) {
+    console.error(JSON.stringify({ event: "handshake_introspection_failed", error: error instanceof Error ? error.message : "unknown" }));
+    return next(new Error("Unable to verify handshake token"));
+  }
+}
+
 function connectGateway(matcher: Matchmaker): void {
   async function closeMatch(socket: RainSocket, notifyPeer = true): Promise<void> {
     const match = await matcher.end(socket.id);
     if (!match || !notifyPeer) return;
     io.to(peerId(match, socket.id)).emit("peerLeft");
   }
+
+  io.use((socket, next) => { void authenticate(socket, next); });
 
   io.on("connection", (socket) => {
     socket.on("joinQueue", async (input) => {
@@ -98,7 +138,7 @@ function connectGateway(matcher: Matchmaker): void {
       const match = await matcher.end(socket.id);
       if (!match) return emitError(socket, "NO_ACTIVE_MATCH", "There is no active match to report.");
       // The report boundary is intentionally here; persist it via the Postgres outbox in the next service milestone.
-      console.info(JSON.stringify({ event: "peer_reported", matchId: match.id, reporterSocketId: socket.id, ...parsed.data }));
+      console.info(JSON.stringify({ event: "peer_reported", matchId: match.id, reporterAccountId: socket.data.accountId ?? null, reporterSocketId: socket.id, ...parsed.data }));
       io.to(peerId(match, socket.id)).emit("peerLeft");
       socket.emit("reported");
     });

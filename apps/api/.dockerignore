@@ -1,8 +1,6 @@
 node_modules
 dist
+.uploads
 .env
 .env.*
 !.env.example
-coverage
-.DS_Store
-*.tsbuildinfo

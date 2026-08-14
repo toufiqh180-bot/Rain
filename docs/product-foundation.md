@@ -1,6 +1,8 @@
 # Rain product foundation
 
-The web client now has a complete product-shaped frontend: a landing page, staged profile onboarding, temporary random chat, voice/video preparation, Circles, friends, saved DMs, profile controls, subtle opt-in audio feedback, and membership screens.
+The web client is a complete product-shaped frontend: a scroll-driven landing page, email/password accounts, staged profile onboarding, temporary random chat, voice/video preview, Circles, connections, saved DMs, profile controls, opt-in audio feedback, and membership screens.
+
+It renders **only** what a service returns. There are no seeded people, no sample conversations, no demo counts, and no client-side entitlements. Where a service is not connected, the screen says so.
 
 ## Product rules
 
@@ -12,16 +14,20 @@ The web client now has a complete product-shaped frontend: a landing page, stage
 
 ## What currently works in the browser
 
-- Profile setup, avatar upload, plan selection, sound preference, saved DMs, friends, group messages, and per-user demo karma persist in `localStorage` for a useful frontend prototype.
-- Random **text** matching still uses the deployed Socket.IO gateway and stays ephemeral.
-- Voice and video use real local media previews and reactive UI, but do not yet create a peer-to-peer media room.
-- The membership selection is visual only. It must not charge a user or unlock a real entitlement until the services below exist.
+- **Accounts.** Email and password sign-up, sign-in, session restore from an HttpOnly cookie, and a sign-out that revokes server-side *before* the client forgets anything. No password or token is ever written to browser storage.
+- **Profiles, connections, DMs, Circles, billing.** Wired to the API through [`apps/web/src/api.ts`](../apps/web/src/api.ts) against [the contract](api-contract.md). Connect a service and these screens are live.
+- **Random text matching** runs on the Socket.IO gateway and stays ephemeral.
+- **Voice and video** use real local media previews with explicit mute/stop control. Joining asks the API for an SFU room token; until that service exists the UI says so rather than pretending to connect.
+- **Membership** opens Stripe Checkout and reads entitlement back from billing. Choosing a plan in the browser grants nothing.
+
+The only thing this browser remembers on its own is one device preference: whether sound is on.
 
 ## Production services to add
 
 ### 1. Accounts and durable data
 
-Use an authentication provider (for example, Clerk or Auth.js) plus Postgres. Store:
+The client already speaks the full contract in [api-contract.md](api-contract.md);
+implement it with an auth provider (Clerk, Auth.js) or your own service, plus Postgres. Store:
 
 - users, profile fields, age-gate acceptance, plan entitlement and privacy choices
 - friend requests and accepted friendships
@@ -67,8 +73,8 @@ Before marketing voice/video or charging users, add age gating, rate limits, blo
 
 ## Recommended delivery order
 
-1. Fix the live text gateway connection and ship this frontend behind an 18+ beta gate.
-2. Add authentication, profiles, Postgres, avatar storage, friend requests, and persistent DMs.
+1. Implement [the API contract](api-contract.md) — accounts, profiles, Postgres, avatar storage, connections, persistent DMs — and ship behind an 18+ beta gate.
+2. Point `VITE_API_URL` at it and set `AUTH_INTROSPECTION_URL` on the gateway so no anonymous socket reaches the queue.
 3. Add entitlement verification and Stripe before exposing paid filter controls.
 4. Add server-side gender/language/trust matching and moderation tooling.
 5. Add channels and channel presence.

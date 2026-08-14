@@ -16,14 +16,14 @@ When adding a capability, put it in the matching boundary it belongs to:
 | Need | Correct home |
 | --- | --- |
 | More profile/match preferences | `packages/protocol`, then matcher compatibility logic |
-| Accounts, blocks, reports, retention | a `packages/database` service backed by Postgres + an outbox worker |
+| Accounts, blocks, reports, retention | a service implementing [api-contract.md](api-contract.md), backed by Postgres + an outbox worker |
 | CAPTCHA/device reputation/rate limits | an admission service before `joinQueue` |
 | Voice invitation and consent | new gateway events, checked against active match |
 | Voice media + animated microphones | browser client plus a LiveKit token service; never Socket.IO audio |
 
 ## Deploy topology
 
-Deploy `apps/web` as static assets behind a CDN. Run at least two copies of `apps/realtime` as long-lived containers behind a WebSocket-capable load balancer. Set `NODE_ENV=production`, `MATCHMAKER_DRIVER=redis`, `REDIS_URL`, and an explicit `ALLOWED_ORIGINS` list. Kubernetes/ECS health checks should call `/healthz`; only route traffic after `/readyz` is 200.
+Deploy `apps/web` as static assets behind a CDN, built with `VITE_API_URL` and `VITE_REALTIME_URL` set. Run at least two copies of `apps/realtime` as long-lived containers behind a WebSocket-capable load balancer. Set `NODE_ENV=production`, `MATCHMAKER_DRIVER=redis`, `REDIS_URL`, `AUTH_INTROSPECTION_URL`, and an explicit `ALLOWED_ORIGINS` list. The gateway refuses to boot in production without the introspection URL, so an unauthenticated socket cannot reach the queue. Kubernetes/ECS health checks should call `/healthz`; only route traffic after `/readyz` is 200.
 
 Do not use `MATCHMAKER_DRIVER=memory` outside a single local process. The app intentionally refuses that configuration in production.
 

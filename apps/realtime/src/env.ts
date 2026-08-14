@@ -6,9 +6,22 @@ const environmentSchema = z.object({
   ALLOWED_ORIGINS: z.string().default("http://localhost:5173"),
   MATCHMAKER_DRIVER: z.enum(["memory", "redis"]).default("memory"),
   REDIS_URL: z.string().url().optional(),
+  /**
+   * Where to exchange a client's short-lived handshake token for an account id.
+   * Unset means anonymous sockets, which only local development may do.
+   */
+  AUTH_INTROSPECTION_URL: z.string().url().optional(),
+  /** Shared secret proving to the API that this caller is the gateway. */
+  INTERNAL_API_KEY: z.string().min(24).optional(),
 }).superRefine((environment, context) => {
   if (environment.NODE_ENV === "production" && environment.MATCHMAKER_DRIVER !== "redis") {
     context.addIssue({ code: "custom", path: ["MATCHMAKER_DRIVER"], message: "Production requires MATCHMAKER_DRIVER=redis." });
+  }
+  if (environment.NODE_ENV === "production" && !environment.AUTH_INTROSPECTION_URL) {
+    context.addIssue({ code: "custom", path: ["AUTH_INTROSPECTION_URL"], message: "Production requires AUTH_INTROSPECTION_URL so sockets are authenticated." });
+  }
+  if (environment.AUTH_INTROSPECTION_URL && !environment.INTERNAL_API_KEY) {
+    context.addIssue({ code: "custom", path: ["INTERNAL_API_KEY"], message: "INTERNAL_API_KEY is required to call the introspection endpoint." });
   }
   if (environment.MATCHMAKER_DRIVER === "redis" && !environment.REDIS_URL) {
     context.addIssue({ code: "custom", path: ["REDIS_URL"], message: "REDIS_URL is required for Redis matching." });

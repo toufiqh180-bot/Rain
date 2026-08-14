@@ -1,0 +1,482 @@
+/*
+ * Landing page.
+ *
+ * Landing.tsx writes six scroll values onto `.lp` as custom properties:
+ *   --page      whole-document progress          0 → 1
+ *   --velocity  smoothed scroll speed, absolute  0 → 1
+ *   --hero      hero pin progress                0 → 1
+ *   --chapters  chapter pin progress             0 → 1
+ *   --cp        progress inside the live chapter 0 → 1
+ *   --marquee   marquee viewport crossing        0 → 1
+ *   --close     closing viewport crossing        0 → 1
+ *
+ * Scenes are keyframe animations held at `paused` and scrubbed with a negative
+ * `animation-delay`, so scroll position — not time — decides the frame.
+ */
+
+.lp {
+  --ink: #f4f4ee;
+  --ink-dim: #8f8f89;
+  /* Defaults matter: these are read by calc() before the first rAF writes them,
+     and an undefined var would invalidate the whole declaration. */
+  --page: 0;
+  --velocity: 0;
+  --hero: 0;
+  --chapters: 0;
+  --cp: 0;
+  --marquee: 0;
+  --close: 0;
+  position: relative;
+  color: var(--ink);
+  background: #060605;
+}
+
+.lp .mark,
+.lp-hero__cloud {
+  width: 30px;
+  height: 30px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 3.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.lp-rain {
+  position: fixed;
+  z-index: 0;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* Nav ---------------------------------------------------------------------- */
+
+.lp-nav {
+  display: flex;
+  position: fixed;
+  z-index: 20;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 64px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 clamp(18px, 4vw, 44px);
+  border-bottom: 1px solid transparent;
+  transition: background .4s ease, border-color .4s ease, backdrop-filter .4s ease;
+}
+.lp[data-lifted="true"] .lp-nav {
+  border-bottom-color: #1e1e1c;
+  background: rgba(6, 6, 5, .72);
+  backdrop-filter: blur(18px) saturate(140%);
+}
+.lp-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--ink);
+  font-size: 21px;
+  font-weight: 600;
+  letter-spacing: -.07em;
+  text-decoration: none;
+}
+.lp-brand span { transform: translateY(-1px); }
+.lp-nav__actions { display: flex; align-items: center; gap: 10px; }
+
+.lp-ghost,
+.lp-solid {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 36px;
+  padding: 0 15px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 500;
+  transition: transform .25s cubic-bezier(.2, .7, .3, 1), background .25s ease, color .25s ease, border-color .25s ease;
+}
+.lp-ghost { color: var(--ink-dim); background: transparent; }
+.lp-ghost:hover { color: var(--ink); }
+.lp-solid { color: #0b0b0a; border-color: var(--ink); background: var(--ink); }
+.lp-solid:hover { transform: translateY(-1px); background: #fff; }
+.lp-solid--lg { height: 48px; padding: 0 24px; font-size: 15px; }
+
+/* Hero --------------------------------------------------------------------- */
+
+.lp-hero {
+  position: relative;
+  z-index: 1;
+  height: 190vh;
+}
+.lp-hero__pin {
+  display: grid;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  align-content: center;
+  justify-items: center;
+  padding: 0 20px;
+  text-align: center;
+}
+
+/* The cloud sits behind the type and swallows the viewport as you descend. */
+.lp-hero__mark {
+  position: absolute;
+  z-index: 0;
+  display: grid;
+  place-items: center;
+  color: #2a2a27;
+  opacity: calc(.85 - var(--hero) * .85);
+  transform: scale(calc(1 + var(--hero) * 13)) translateY(calc(var(--hero) * 6vh));
+  will-change: transform, opacity;
+}
+.lp-hero__cloud { width: clamp(150px, 22vw, 260px); height: auto; stroke-width: 2.1; }
+
+.lp-hero__title {
+  z-index: 1;
+  max-width: 14ch;
+  margin: 0;
+  font-size: clamp(52px, 9.5vw, 132px);
+  font-weight: 600;
+  letter-spacing: -.055em;
+  line-height: .93;
+  opacity: calc(1 - var(--hero) * 2.1);
+  transform: translateY(calc(var(--hero) * -70px)) scale(calc(1 - var(--hero) * .07));
+  will-change: transform, opacity;
+}
+.lp-hero__title em { color: var(--ink-dim); font-style: normal; font-weight: 400; }
+.lp-hero__title span,
+.lp-hero__title em { display: inline-block; animation: hero-word .9s cubic-bezier(.2, .8, .2, 1) both; }
+.lp-hero__title span:nth-child(2) { animation-delay: .07s; }
+.lp-hero__title em { animation-delay: .14s; }
+@keyframes hero-word {
+  from { opacity: 0; transform: translateY(.5em) rotate(1.5deg); filter: blur(6px); }
+  to { opacity: 1; transform: none; filter: none; }
+}
+
+.lp-hero__cta {
+  z-index: 1;
+  margin-top: clamp(28px, 4vw, 44px);
+  opacity: calc(1 - var(--hero) * 3);
+  transform: translateY(calc(var(--hero) * -40px));
+}
+
+.lp-hero__hint {
+  position: absolute;
+  bottom: 42px;
+  width: 1px;
+  height: 46px;
+  overflow: hidden;
+  background: #22221f;
+  opacity: calc(1 - var(--hero) * 5);
+}
+.lp-hero__hint i {
+  display: block;
+  width: 100%;
+  height: 40%;
+  background: linear-gradient(to bottom, transparent, var(--ink));
+  animation: hint-fall 1.9s cubic-bezier(.5, 0, .5, 1) infinite;
+}
+@keyframes hint-fall { from { transform: translateY(-100%); } to { transform: translateY(250%); } }
+
+/* Chapters ----------------------------------------------------------------- */
+
+.lp-chapters {
+  position: relative;
+  z-index: 1;
+  height: 380vh;
+}
+.lp-chapters__pin {
+  display: grid;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  align-content: center;
+  justify-items: center;
+  gap: clamp(24px, 4vh, 46px);
+  padding: 70px 20px 0;
+}
+
+.lp-chapters__word {
+  height: clamp(58px, 8vw, 104px);
+  overflow: hidden;
+  transform: translateY(calc(var(--velocity) * -12px));
+}
+.lp-chapters__word span {
+  display: block;
+  font-size: clamp(56px, 8vw, 104px);
+  font-weight: 600;
+  letter-spacing: -.06em;
+  line-height: 1;
+  animation: word-rise .62s cubic-bezier(.16, 1, .3, 1) both;
+}
+@keyframes word-rise {
+  from { opacity: 0; transform: translateY(100%) skewY(3deg); }
+  to { opacity: 1; transform: none; }
+}
+
+.lp-stage {
+  position: relative;
+  width: min(560px, 88vw);
+  height: min(340px, 42vh);
+  transform: scale(calc(1 - var(--velocity) * .022));
+}
+.lp-stage__ring {
+  position: absolute;
+  inset: 50% auto auto 50%;
+  width: min(330px, 62vw);
+  aspect-ratio: 1;
+  border: 1px solid #201f1d;
+  border-radius: 50%;
+  transform: translate(-50%, -50%) rotate(calc(var(--chapters) * 180deg));
+}
+.lp-stage__ring::after {
+  position: absolute;
+  top: -3px;
+  left: 50%;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--ink);
+  content: "";
+}
+
+/* Every scene is mounted; only the live one is painted. */
+.scene {
+  display: grid;
+  position: absolute;
+  inset: 0;
+  align-content: center;
+  justify-items: center;
+  opacity: 0;
+  transition: opacity .45s ease;
+  pointer-events: none;
+}
+.lp-stage[data-scene="text"] .scene--text,
+.lp-stage[data-scene="voice"] .scene--voice,
+.lp-stage[data-scene="video"] .scene--video,
+.lp-stage[data-scene="circles"] .scene--circles { opacity: 1; }
+
+/* Scrub contract: hold each animation paused and let --cp choose the frame. */
+.scene * {
+  animation-duration: 1s;
+  animation-timing-function: linear;
+  animation-fill-mode: both;
+  animation-play-state: paused;
+  animation-delay: calc(var(--cp) * -1s);
+}
+
+/* Text — a conversation writing itself as you scroll. */
+.scene--text { gap: 10px; justify-items: start; width: min(360px, 76vw); margin: auto; }
+.scene-bubble {
+  height: 34px;
+  margin: 0;
+  border-radius: 17px;
+  background: #1b1b19;
+}
+.scene-bubble--them { width: 62%; border-bottom-left-radius: 5px; animation-name: bubble-them; }
+.scene-bubble--me { width: 48%; justify-self: end; color: #0b0b0a; background: var(--ink); border-bottom-right-radius: 5px; animation-name: bubble-me; }
+.scene-bubble--last { width: 40%; animation-name: bubble-last; }
+@keyframes bubble-them {
+  0% { opacity: 0; transform: translateY(14px) scale(.92); }
+  22%, 100% { opacity: 1; transform: none; }
+}
+@keyframes bubble-me {
+  0%, 30% { opacity: 0; transform: translateY(14px) scale(.92); }
+  52%, 100% { opacity: 1; transform: none; }
+}
+@keyframes bubble-last {
+  0%, 62% { opacity: 0; transform: translateY(14px) scale(.92); }
+  84%, 100% { opacity: 1; transform: none; }
+}
+
+/* Voice — a wave whose crest travels with the scroll. */
+.scene--voice { align-content: center; }
+.scene-wave { display: flex; align-items: center; gap: 4px; height: 150px; }
+.scene-wave i {
+  display: block;
+  width: 3px;
+  height: 100%;
+  border-radius: 3px;
+  background: linear-gradient(to bottom, #55554f, var(--ink), #55554f);
+  transform-origin: center;
+  animation-name: wave-bar;
+  /* Each bar reads the scrub a little later, which makes the crest travel. */
+  animation-delay: calc(var(--cp) * -1s - var(--i) * .028s);
+}
+@keyframes wave-bar {
+  0%, 100% { transform: scaleY(.06); }
+  25% { transform: scaleY(.9); }
+  50% { transform: scaleY(.16); }
+  75% { transform: scaleY(.55); }
+}
+
+/* Video — an aperture opening onto a frame. */
+.scene--video { align-content: center; }
+.scene-frame {
+  position: relative;
+  width: min(340px, 74vw);
+  height: min(210px, 26vh);
+  overflow: hidden;
+  border: 1px solid #33332f;
+  border-radius: 14px;
+  background: radial-gradient(120% 120% at 30% 20%, #26262300, #0d0d0c);
+  animation-name: frame-open;
+}
+@keyframes frame-open {
+  0% { opacity: 0; transform: scale(.86); }
+  30%, 100% { opacity: 1; transform: none; }
+}
+.scene-frame__iris {
+  position: absolute;
+  inset: 50% auto auto 50%;
+  width: 108px;
+  height: 108px;
+  border: 1px solid #55554e;
+  border-radius: 50%;
+  animation-name: iris-open;
+}
+@keyframes iris-open {
+  0% { opacity: 0; transform: translate(-50%, -50%) scale(.2); }
+  40% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  100% { opacity: .18; transform: translate(-50%, -50%) scale(3.1); }
+}
+.scene-frame__sweep {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 34%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(244, 244, 238, .1), transparent);
+  animation-name: frame-sweep;
+}
+@keyframes frame-sweep { from { transform: translateX(-120%); } to { transform: translateX(420%); } }
+
+/* Circles — a group assembling out of the rain. */
+.scene--circles { align-content: center; }
+.scene-orbit {
+  position: relative;
+  width: min(280px, 62vw);
+  aspect-ratio: 1;
+  animation-name: orbit-turn;
+}
+@keyframes orbit-turn { from { transform: rotate(-40deg); } to { transform: rotate(50deg); } }
+.scene-orbit i {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 34px;
+  height: 34px;
+  margin: -17px;
+  border: 1px solid #4c4c46;
+  border-radius: 50%;
+  background: #23231f;
+  /* Six seats around the ring, then a staggered arrival. */
+  transform: rotate(calc(var(--i) * 60deg)) translateY(calc(min(140px, 31vw) * -1)) rotate(calc(var(--i) * -60deg));
+  animation-name: orbit-node;
+  animation-delay: calc(var(--cp) * -1s - var(--i) * .07s);
+}
+.scene-orbit i:nth-child(odd) { background: #33332d; }
+@keyframes orbit-node {
+  0% { opacity: 0; }
+  30%, 100% { opacity: 1; }
+}
+
+.lp-chapters__ticks { display: flex; gap: 6px; }
+.lp-chapters__ticks i {
+  display: block;
+  width: 26px;
+  height: 2px;
+  border-radius: 2px;
+  background: #232320;
+  transition: background .35s ease;
+}
+.lp-chapters__ticks i.is-on { background: var(--ink); }
+
+/* Marquee ------------------------------------------------------------------ */
+
+.lp-marquee {
+  position: relative;
+  z-index: 1;
+  padding: clamp(70px, 12vh, 150px) 0;
+  overflow: hidden;
+  border-top: 1px solid #17171533;
+}
+.lp-marquee__track {
+  display: flex;
+  width: max-content;
+  color: #1e1e1b;
+  font-size: clamp(60px, 12vw, 170px);
+  font-weight: 600;
+  letter-spacing: -.06em;
+  line-height: 1;
+  white-space: nowrap;
+  transform: translateX(calc(var(--marquee) * -52%));
+  will-change: transform;
+}
+
+/* Close -------------------------------------------------------------------- */
+
+.lp-close {
+  display: grid;
+  position: relative;
+  z-index: 1;
+  min-height: 78vh;
+  align-content: center;
+  justify-items: center;
+  gap: 34px;
+  padding: 60px 20px;
+  text-align: center;
+}
+.lp-close h2 {
+  margin: 0;
+  font-size: clamp(38px, 6.4vw, 88px);
+  font-weight: 600;
+  letter-spacing: -.055em;
+  line-height: .98;
+  opacity: calc(.15 + var(--close) * 1.9);
+  transform: translateY(calc(28px - var(--close) * 28px));
+}
+.lp-close em { color: var(--ink-dim); font-style: normal; font-weight: 400; }
+
+.lp-foot {
+  display: flex;
+  position: relative;
+  z-index: 1;
+  align-items: center;
+  justify-content: space-between;
+  padding: 26px clamp(18px, 4vw, 44px);
+  border-top: 1px solid #171715;
+  color: #5c5c57;
+  font-family: "DM Mono", monospace;
+  font-size: 10px;
+  letter-spacing: .07em;
+}
+
+/* Motion preferences -------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .lp-hero,
+  .lp-chapters { height: auto; }
+  .lp-hero__pin,
+  .lp-chapters__pin { position: static; height: auto; padding: 130px 20px 90px; }
+  .lp-hero__mark { display: none; }
+  .lp-hero__title,
+  .lp-hero__cta,
+  .lp-close h2 { opacity: 1; transform: none; }
+  .lp-hero__hint { display: none; }
+  .lp-stage { transform: none; }
+  .lp-marquee__track { transform: none; }
+  .lp *,
+  .lp *::before,
+  .lp *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
+  .scene { position: relative; inset: auto; opacity: 1; }
+}
+
+@media (max-width: 720px) {
+  .lp-hero { height: 170vh; }
+  .lp-chapters { height: 340vh; }
+  .lp-nav__actions .lp-ghost { display: none; }
+  .lp-stage { height: min(300px, 38vh); }
+}

@@ -3,13 +3,14 @@
   "private": true,
   "packageManager": "pnpm@11.9.0",
   "scripts": {
-    "dev": "pnpm --filter @rain/protocol build && concurrently -n web,realtime -c cyan,magenta \"pnpm --filter @rain/web dev\" \"pnpm --filter @rain/realtime dev\"",
+    "dev": "pnpm --filter @rain/protocol build && concurrently -n web,api,realtime -c cyan,green,magenta \"pnpm --filter @rain/web dev\" \"pnpm --filter @rain/api dev\" \"pnpm --filter @rain/realtime dev\"",
     "dev:distributed": "MATCHMAKER_DRIVER=redis REDIS_URL=redis://localhost:6379 pnpm dev",
     "infra:up": "docker compose -f infra/docker-compose.yml up -d",
     "infra:down": "docker compose -f infra/docker-compose.yml down",
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
-    "test": "pnpm -r test --if-present"
+    "test": "pnpm -r test --if-present",
+    "migrate": "pnpm --filter @rain/api migrate"
   },
   "devDependencies": {
     "concurrently": "^9.2.1",
