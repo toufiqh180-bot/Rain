@@ -8,6 +8,7 @@ import {
   billing,
   circles as circlesApi,
   isApiConfigured,
+  isDemoMode,
   isRealtimeConfigured,
   media,
   onUnauthorized,
@@ -35,6 +36,28 @@ type MatchStatus = "offline" | "ready" | "searching" | "matched" | "peer-left";
 type MediaState = "idle" | "requesting" | "previewing" | "blocked" | "unsupported";
 type Sound = "tap" | "match" | "send" | "notice";
 type RainSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
+
+const demoSession: Session = {
+  account: {
+    id: "demo-account",
+    email: "developer@rain.local",
+    emailVerified: true,
+    createdAt: "2026-01-01T00:00:00.000Z",
+  },
+  profile: {
+    id: "demo-profile",
+    name: "Rain Developer",
+    handle: "rain-dev",
+    avatarUrl: null,
+    bio: "Previewing Rain locally.",
+    identity: "Prefer not to say",
+    seeking: "Everyone",
+    interests: ["music", "curiosity", "late-night walks"],
+    plan: "pro",
+    karma: 100,
+    createdAt: "2026-01-01T00:00:00.000Z",
+  },
+};
 
 /** The only thing this browser is allowed to remember on its own. */
 const soundKey = "rain.device.sound";
@@ -175,13 +198,14 @@ function useResource<T>(loader: (signal: AbortSignal) => Promise<T>, deps: unkno
 /* ------------------------------------------------------------------- app -- */
 
 export default function App() {
-  const [session, setSession] = useState<Session | null>(null);
-  const [stage, setStage] = useState<Stage>("landing");
-  const [booting, setBooting] = useState(isApiConfigured);
+  const demo = import.meta.env.DEV && import.meta.env.VITE_DEMO_MODE === "true";
+  const [session, setSession] = useState<Session | null>(demo ? demoSession : null);
+  const [stage, setStage] = useState<Stage>(demo ? "app" : "landing");
+  const [booting, setBooting] = useState(demo ? false : isApiConfigured);
 
   // Restore the session from the HttpOnly cookie so a refresh keeps you signed in.
   useEffect(() => {
-    if (!isApiConfigured) return;
+    if (!isApiConfigured || demo) return;
     const controller = new AbortController();
     auth
       .session(controller.signal)
@@ -195,7 +219,7 @@ export default function App() {
         if (!controller.signal.aborted) setBooting(false);
       });
     return () => controller.abort();
-  }, []);
+  }, [demo]);
 
   // A rejected session anywhere in the app returns the whole client to signed out.
   useEffect(
@@ -208,13 +232,18 @@ export default function App() {
   );
 
   const signOut = useCallback(async () => {
+    if (demo) {
+      setSession(null);
+      setStage("landing");
+      return;
+    }
     // Revoke server-side first. Only then does the client forget anything —
     // otherwise the UI would look signed out while the session stayed valid.
     await auth.signOut();
     setSession(null);
     setStage("landing");
     window.scrollTo(0, 0);
-  }, []);
+  }, [demo]);
 
   if (booting) {
     return (
@@ -717,7 +746,7 @@ function Forecast({ profile, onNavigate }: { profile: Profile; onNavigate: (sect
 
 function TextMatch({ profile, plan, onNotice, onSound }: { profile: Profile; plan: Plan; onNotice: (message: string) => void; onSound: (sound: Sound) => void }) {
   const socket = useRef<RainSocket | null>(null);
-  const [status, setStatus] = useState<MatchStatus>("offline");
+  const [status, setStatus] = useState<MatchStatus>(isDemoMode ? "ready" : "offline");
   const [queue, setQueue] = useState<QueuePreferences>({ language: "en", interests: profile.interests });
   const [interestDraft, setInterestDraft] = useState("");
   const [messages, setMessages] = useState<{ id: string; body: string; mine: boolean }[]>([]);
@@ -728,6 +757,10 @@ function TextMatch({ profile, plan, onNotice, onSound }: { profile: Profile; pla
 
   useEffect(() => {
     if (!isRealtimeConfigured) return;
+    if (isDemoMode) {
+      setStatus("ready");
+      return;
+    }
     let client: RainSocket | null = null;
     let cancelled = false;
 
@@ -783,6 +816,14 @@ function TextMatch({ profile, plan, onNotice, onSound }: { profile: Profile; pla
   }
 
   function begin() {
+    if (isDemoMode) {
+      setMessages([]);
+      setShared(["music"]);
+      setMatchId("demo-match");
+      setStatus("matched");
+      onSound("match");
+      return;
+    }
     if (!socket.current?.connected) return onNotice("Not connected to the text gateway.");
     setMessages([]);
     setShared([]);
@@ -799,6 +840,13 @@ function TextMatch({ profile, plan, onNotice, onSound }: { profile: Profile; pla
   }
 
   function next() {
+    if (isDemoMode) {
+      setMessages([]);
+      setShared(["curiosity"]);
+      setMatchId("demo-match-next");
+      setStatus("matched");
+      return;
+    }
     if (!socket.current?.connected) return;
     setMessages([]);
     setShared([]);
@@ -812,7 +860,7 @@ function TextMatch({ profile, plan, onNotice, onSound }: { profile: Profile; pla
     const body = draft.trim();
     if (!body || !matched) return;
     const outgoing: ChatMessage = { clientMessageId: crypto.randomUUID(), body };
-    socket.current?.emit("message", outgoing);
+    if (!isDemoMode) socket.current?.emit("message", outgoing);
     setMessages((current) => [...current, { id: outgoing.clientMessageId, body, mine: true }]);
     setDraft("");
     onSound("send");

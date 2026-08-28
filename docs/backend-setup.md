@@ -146,8 +146,7 @@ stored. Hand those tokens to your mailer; nothing else changes.
 
 ## Scaling: what to do, and when
 
-You do not need any of this yet. Each line is a threshold and its fix.
-
+ 
 | When | What happens | What to do |
 | --- | --- | --- |
 | Any traffic | — | Run 2+ API containers. They are stateless — sessions live in Postgres, not in memory — so this works with no code change. |
