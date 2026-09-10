@@ -12,6 +12,7 @@
   "dependencies": {
     "@rain/protocol": "workspace:*",
     "@socket.io/redis-adapter": "^8.3.0",
+    "dotenv": "^17.4.2",
     "redis": "^4.7.0",
     "socket.io": "^4.8.1",
     "zod": "^3.24.2"
