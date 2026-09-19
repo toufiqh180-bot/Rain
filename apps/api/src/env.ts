@@ -50,6 +50,18 @@ const schema = z.object({
 
   /** Shared secret the realtime gateway presents when introspecting a token. */
   INTERNAL_API_KEY: z.string().min(24).optional(),
+
+  /** Transactional email. Absent means verify/reset tokens are logged only. */
+  EMAIL_FROM: z.string().email().optional(),
+  RESEND_API_KEY: z.string().optional(),
+
+  /** LiveKit SFU. Absent means media room tokens return 503. */
+  LIVEKIT_URL: z.string().url().optional(),
+  LIVEKIT_API_KEY: z.string().optional(),
+  LIVEKIT_API_SECRET: z.string().optional(),
+
+  /** Base URL the gateway uses when posting peer reports into the API. */
+  PUBLIC_API_URL: z.string().url().optional(),
 }).superRefine((environment, context) => {
   const require = (path: string, message: string) =>
     context.addIssue({ code: "custom", path: [path], message });
@@ -87,4 +99,8 @@ export const allowedOrigins = env.ALLOWED_ORIGINS.split(",").map((origin) => ori
 
 /** Storage and billing are optional; screens report honestly when they are off. */
 export const storageConfigured = env.STORAGE_DRIVER === "local" || Boolean(env.S3_BUCKET && env.S3_ACCESS_KEY_ID && env.S3_SECRET_ACCESS_KEY);
-export const billingConfigured = Boolean(env.STRIPE_SECRET_KEY && env.STRIPE_PRICE_PLUS && env.STRIPE_PRICE_PRO);
+export const billingConfigured = Boolean(
+  env.STRIPE_SECRET_KEY && env.STRIPE_WEBHOOK_SECRET && env.STRIPE_PRICE_PLUS && env.STRIPE_PRICE_PRO,
+);
+export const emailConfigured = Boolean(env.RESEND_API_KEY && env.EMAIL_FROM);
+export const livekitConfigured = Boolean(env.LIVEKIT_URL && env.LIVEKIT_API_KEY && env.LIVEKIT_API_SECRET);

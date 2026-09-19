@@ -3,17 +3,24 @@ import { z } from "zod";
 import { env } from "../env.js";
 import { query, queryOne, transaction } from "../db.js";
 import { ApiError, send } from "../http.js";
-import { createToken, hashPassword, hashToken, needsRehash, verifyPassword } from "../security.js";
-import { issueSession, requireViewer, revokeAllSessions, revokeSession, optionalViewer } from "../session.js";
+import { sendEmail } from "../mail.js";
+import { createToken, hashPassword, hashToken, needsRehash, verifyPassword, handleFrom } from "../security.js";
+import { issueSession, requireViewer, revokeAllSessions, revokeSession, optionalViewer, CSRF_COOKIE, SESSION_COOKIE } from "../session.js";
 import { serialiseProfile, type ProfileRow } from "./profile.js";
 
 const credentials = z.object({
   email: z.string().trim().toLowerCase().email(),
   password: z.string().min(12).max(200),
 });
-const signUpBody = credentials.extend({ acceptedTerms: z.literal(true) });
+const signUpBody = credentials.extend({ acceptedTerms: z.literal(true), acceptedAgeGate: z.literal(true).optional() });
 
-/** Failed sign-ins are counted in Postgres so the limit holds across instances. */
+const guestBody = z.object({
+  username: z.string().trim().min(2).max(24),
+  gender: z.string().trim().min(1).max(40),
+  acceptedTerms: z.literal(true),
+  acceptedAgeGate: z.literal(true),
+});
+
 const MAX_FAILURES = 8;
 const WINDOW_MINUTES = 15;
 
@@ -33,10 +40,15 @@ async function recordAttempt(email: string, ip: string, succeeded: boolean): Pro
 }
 
 async function sessionPayload(accountId: string) {
-  const account = await queryOne<{ id: string; email: string; email_verified: boolean; created_at: Date }>(
-    "select id, email, email_verified, created_at from accounts where id = $1",
-    [accountId],
-  );
+  const account = await queryOne<{
+    id: string;
+    email: string | null;
+    email_verified: boolean;
+    is_guest: boolean;
+    created_at: Date;
+  }>("select id, email, email_verified, is_guest, created_at from accounts where id = $1 and deleted_at is null", [
+    accountId,
+  ]);
   if (!account) throw ApiError.unauthorized();
   const profile = await queryOne<ProfileRow>("select * from profiles where account_id = $1", [accountId]);
   const plan = await queryOne<{ plan: string; status: string }>(
@@ -46,20 +58,87 @@ async function sessionPayload(accountId: string) {
   return {
     account: {
       id: account.id,
-      email: account.email,
+      email: account.email ?? "",
       emailVerified: account.email_verified,
+      isGuest: account.is_guest,
       createdAt: account.created_at.toISOString(),
     },
-    profile: profile ? serialiseProfile(profile, plan?.status === "active" || plan?.status === "trialing" ? plan.plan : "free") : null,
+    profile: profile
+      ? serialiseProfile(
+          profile,
+          plan?.status === "active" || plan?.status === "trialing" ? plan.plan : "free",
+        )
+      : null,
   };
 }
 
+/** Hard-deletes a guest account and every row cascaded from it. */
+async function destroyGuestAccount(accountId: string): Promise<void> {
+  await transaction(async (client) => {
+    const row = await client.query<{ is_guest: boolean }>(
+      "select is_guest from accounts where id = $1 and deleted_at is null",
+      [accountId],
+    );
+    if (!row.rowCount || !row.rows[0].is_guest) {
+      throw ApiError.forbidden("Only guest profiles can be removed this way.");
+    }
+    // Cascade removes sessions, profile, connections, DMs, circle memberships.
+    await client.query("delete from accounts where id = $1", [accountId]);
+  });
+}
+
 export async function authRoutes(app: FastifyInstance): Promise<void> {
-  // A signed-out visitor gets 401 here. That is an expected answer, not an error.
   app.get("/v1/auth/session", async (request, reply) => {
     const viewer = await optionalViewer(request);
     if (!viewer) throw ApiError.unauthorized("No active session.");
     return send(reply, 200, await sessionPayload(viewer.accountId));
+  });
+
+  /**
+   * Credential-free entry: username + gender, age gate, then a real session
+   * with friends/inbox. Signing out deletes the guest forever.
+   */
+  app.post("/v1/auth/guest", async (request, reply) => {
+    const parsed = guestBody.safeParse(request.body);
+    if (!parsed.success) {
+      throw ApiError.badRequest("invalid_guest", "Enter a username and gender, and confirm you are 18+.");
+    }
+    const { username, gender } = parsed.data;
+
+    const accountId = await transaction(async (client) => {
+      const inserted = await client.query<{ id: string }>(
+        `insert into accounts (email, password_hash, email_verified, is_guest, terms_version, terms_accepted_at, age_gate_accepted_at, age_gate_version)
+         values (null, null, false, true, $1, now(), now(), $1) returning id`,
+        [env.TERMS_VERSION],
+      );
+      const id = inserted.rows[0].id;
+      await client.query("insert into subscriptions (account_id) values ($1)", [id]);
+
+      let profileId: string | null = null;
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        try {
+          const profile = await client.query<{ id: string }>(
+            `insert into profiles (account_id, name, handle, bio, identity, seeking, interests)
+             values ($1, $2, $3, '', $4, 'Everyone', '{}') returning id`,
+            [id, username, handleFrom(username), gender],
+          );
+          profileId = profile.rows[0].id;
+          break;
+        } catch (error) {
+          if ((error as { code?: string }).code !== "23505") throw error;
+        }
+      }
+      if (!profileId) throw ApiError.conflict("handle_unavailable", "Could not reserve that username. Try another.");
+
+      await client.query("insert into audit_log (account_id, action, metadata) values ($1, 'guest.created', $2)", [
+        id,
+        JSON.stringify({ ip: request.ip, termsVersion: env.TERMS_VERSION }),
+      ]);
+      return id;
+    });
+
+    await issueSession(reply, accountId, request);
+    return send(reply, 200, await sessionPayload(accountId));
   });
 
   app.post("/v1/auth/sign-up", async (request, reply) => {
@@ -69,24 +148,31 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         password: "Use at least 12 characters.",
       });
     }
-    const { email, password } = parsed.data;
+    const { email, password, acceptedAgeGate } = parsed.data;
 
     const passwordHash = await hashPassword(password);
     const accountId = await transaction(async (client) => {
-      const existing = await client.query("select 1 from accounts where lower(email) = $1 and deleted_at is null", [email]);
+      const existing = await client.query("select 1 from accounts where lower(email) = $1 and deleted_at is null", [
+        email,
+      ]);
       if (existing.rowCount) throw ApiError.conflict("email_taken", "That email already has an account.");
 
       const inserted = await client.query<{ id: string }>(
-        `insert into accounts (email, password_hash, terms_version, terms_accepted_at)
-         values ($1, $2, $3, now()) returning id`,
-        [email, passwordHash, env.TERMS_VERSION],
+        `insert into accounts (email, password_hash, terms_version, terms_accepted_at, age_gate_accepted_at, age_gate_version, is_guest)
+         values ($1, $2, $3, now(), $4, $5, false) returning id`,
+        [
+          email,
+          passwordHash,
+          env.TERMS_VERSION,
+          acceptedAgeGate ? new Date() : null,
+          acceptedAgeGate ? env.TERMS_VERSION : null,
+        ],
       );
       const id = inserted.rows[0].id;
-      // Every account has a subscription row from birth, so entitlement reads
-      // never have to special-case "no row yet".
       await client.query("insert into subscriptions (account_id) values ($1)", [id]);
       await client.query("insert into audit_log (account_id, action, metadata) values ($1, 'account.created', $2)", [
-        id, JSON.stringify({ termsVersion: env.TERMS_VERSION, ip: request.ip }),
+        id,
+        JSON.stringify({ termsVersion: env.TERMS_VERSION, ip: request.ip }),
       ]);
       return id;
     });
@@ -97,8 +183,14 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
        values ($1, 'email_verify', $2, now() + interval '2 days')`,
       [accountId, verification.hash],
     );
-    // Wire your mailer here. The token is deliberately not returned in the body.
-    request.log.info({ event: "email_verification_pending", accountId }, "send verification email");
+    await sendEmail({
+      to: email,
+      subject: "Verify your Rain account",
+      text: `Verify your Rain email with this code:\n\n${verification.token}\n\nIt expires in 2 days.`,
+      log: request.log,
+      event: "email_verification_pending",
+      accountId,
+    });
 
     await issueSession(reply, accountId, request);
     return send(reply, 200, await sessionPayload(accountId));
@@ -111,17 +203,15 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
 
     if (await tooManyFailures(email, request.ip)) throw ApiError.tooMany();
 
-    const account = await queryOne<{ id: string; password_hash: string }>(
-      "select id, password_hash from accounts where lower(email) = $1 and deleted_at is null",
+    const account = await queryOne<{ id: string; password_hash: string | null; is_guest: boolean }>(
+      "select id, password_hash, is_guest from accounts where lower(email) = $1 and deleted_at is null",
       [email],
     );
 
-    // Verify even when no account exists, against a throwaway hash, so response
-    // time does not reveal whether the email is registered.
     const hash = account?.password_hash ?? "scrypt$131072$8$1$AAAAAAAAAAAAAAAAAAAAAA==$AAAA";
-    const ok = await verifyPassword(password, hash);
+    const ok = account?.password_hash ? await verifyPassword(password, hash) : await verifyPassword(password, hash);
 
-    if (!account || !ok) {
+    if (!account || account.is_guest || !account.password_hash || !ok) {
       await recordAttempt(email, request.ip, false);
       throw new ApiError(401, "bad_credentials", "Email or password is incorrect.");
     }
@@ -137,11 +227,11 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     await recordAttempt(email, request.ip, true);
     if (needsRehash(account.password_hash)) {
       await query("update accounts set password_hash = $1, updated_at = now() where id = $2", [
-        await hashPassword(password), account.id,
+        await hashPassword(password),
+        account.id,
       ]);
     }
 
-    // Rotate every prior session: a cookie stolen earlier stops working now.
     await revokeAllSessions(account.id);
     await issueSession(reply, account.id, request);
     return send(reply, 200, await sessionPayload(account.id));
@@ -149,34 +239,47 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
 
   app.post("/v1/auth/sign-out", async (request, reply) => {
     const viewer = await requireViewer(request);
+    if (viewer.isGuest) {
+      await destroyGuestAccount(viewer.accountId);
+      reply.clearCookie(SESSION_COOKIE, { path: "/", domain: env.COOKIE_DOMAIN, sameSite: "lax" });
+      reply.clearCookie(CSRF_COOKIE, { path: "/", domain: env.COOKIE_DOMAIN, sameSite: "lax" });
+      return send(reply, 204);
+    }
     await revokeSession(reply, viewer.sessionId);
     return send(reply, 204);
   });
 
   app.post("/v1/auth/password/reset-request", async (request, reply) => {
     const parsed = z.object({ email: z.string().trim().toLowerCase().email() }).safeParse(request.body);
-    // Always 204, even on a malformed or unknown email: the response must not
-    // reveal whether an account exists.
     if (parsed.success) {
-      const account = await queryOne<{ id: string }>(
-        "select id from accounts where lower(email) = $1 and deleted_at is null",
+      const account = await queryOne<{ id: string; email: string }>(
+        "select id, email from accounts where lower(email) = $1 and deleted_at is null and is_guest = false",
         [parsed.data.email],
       );
-      if (account) {
+      if (account?.email) {
         const reset = createToken();
         await query(
           `insert into account_tokens (account_id, purpose, token_hash, expires_at)
            values ($1, 'password_reset', $2, now() + interval '1 hour')`,
           [account.id, reset.hash],
         );
-        request.log.info({ event: "password_reset_pending", accountId: account.id }, "send reset email");
+        await sendEmail({
+          to: account.email,
+          subject: "Reset your Rain password",
+          text: `Reset your Rain password with this code:\n\n${reset.token}\n\nIt expires in one hour.`,
+          log: request.log,
+          event: "password_reset_pending",
+          accountId: account.id,
+        });
       }
     }
     return send(reply, 204);
   });
 
   app.post("/v1/auth/password/reset", async (request, reply) => {
-    const parsed = z.object({ token: z.string().min(20), password: z.string().min(12).max(200) }).safeParse(request.body);
+    const parsed = z
+      .object({ token: z.string().min(20), password: z.string().min(12).max(200) })
+      .safeParse(request.body);
     if (!parsed.success) throw ApiError.badRequest("invalid_reset", "That reset link is no longer valid.");
 
     const row = await queryOne<{ id: string; account_id: string }>(
@@ -189,10 +292,13 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     const passwordHash = await hashPassword(parsed.data.password);
     await transaction(async (client) => {
       await client.query("update account_tokens set consumed_at = now() where id = $1", [row.id]);
-      await client.query("update accounts set password_hash = $1, updated_at = now() where id = $2", [passwordHash, row.account_id]);
-      // A password reset must end every existing session, including the
-      // attacker's if that is why the person reset it.
-      await client.query("update sessions set revoked_at = now() where account_id = $1 and revoked_at is null", [row.account_id]);
+      await client.query("update accounts set password_hash = $1, updated_at = now() where id = $2", [
+        passwordHash,
+        row.account_id,
+      ]);
+      await client.query("update sessions set revoked_at = now() where account_id = $1 and revoked_at is null", [
+        row.account_id,
+      ]);
       await client.query("insert into audit_log (account_id, action) values ($1, 'password.reset')", [row.account_id]);
     });
     return send(reply, 204);
@@ -200,14 +306,23 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
 
   app.post("/v1/auth/email/resend", async (request, reply) => {
     const viewer = await requireViewer(request);
+    if (viewer.isGuest) throw ApiError.forbidden("Guest profiles do not use email.");
     if (viewer.emailVerified) return send(reply, 204);
+    if (!viewer.email) throw ApiError.badRequest("no_email", "This account has no email.");
     const verification = createToken();
     await query(
       `insert into account_tokens (account_id, purpose, token_hash, expires_at)
        values ($1, 'email_verify', $2, now() + interval '2 days')`,
       [viewer.accountId, verification.hash],
     );
-    request.log.info({ event: "email_verification_pending", accountId: viewer.accountId }, "send verification email");
+    await sendEmail({
+      to: viewer.email,
+      subject: "Verify your Rain account",
+      text: `Verify your Rain email with this code:\n\n${verification.token}\n\nIt expires in 2 days.`,
+      log: request.log,
+      event: "email_verification_pending",
+      accountId: viewer.accountId,
+    });
     return send(reply, 204);
   });
 
@@ -222,7 +337,9 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     if (!row) throw ApiError.badRequest("invalid_token", "That verification link is no longer valid.");
     await transaction(async (client) => {
       await client.query("update account_tokens set consumed_at = now() where id = $1", [row.id]);
-      await client.query("update accounts set email_verified = true, updated_at = now() where id = $1", [row.account_id]);
+      await client.query("update accounts set email_verified = true, updated_at = now() where id = $1", [
+        row.account_id,
+      ]);
     });
     return send(reply, 204);
   });

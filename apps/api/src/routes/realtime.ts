@@ -3,18 +3,13 @@ import { z } from "zod";
 import { env } from "../env.js";
 import { query, queryOne } from "../db.js";
 import { ApiError, send } from "../http.js";
+import { issueLiveKitToken } from "../livekit.js";
 import { createToken, hashToken, safeEqual } from "../security.js";
-import { requireProfile, requireViewer } from "../session.js";
+import { requireProfile } from "../session.js";
 
 const TOKEN_TTL_SECONDS = 120;
 
 export async function realtimeRoutes(app: FastifyInstance): Promise<void> {
-  /**
-   * Mints the short-lived token the browser presents on the socket handshake.
-   *
-   * The session cookie never leaves this origin. If a gateway is compromised it
-   * holds two-minute tokens, not sessions.
-   */
   app.post("/v1/realtime/token", async (request, reply) => {
     const viewer = await requireProfile(request);
 
@@ -28,39 +23,39 @@ export async function realtimeRoutes(app: FastifyInstance): Promise<void> {
 
     const token = createToken();
     const expiresAt = new Date(Date.now() + TOKEN_TTL_SECONDS * 1000);
-    await query(
-      "insert into realtime_tokens (account_id, token_hash, expires_at) values ($1, $2, $3)",
-      [viewer.accountId, token.hash, expiresAt],
-    );
+    await query("insert into realtime_tokens (account_id, token_hash, expires_at) values ($1, $2, $3)", [
+      viewer.accountId,
+      token.hash,
+      expiresAt,
+    ]);
     return send(reply, 200, { token: token.token, expiresAt: expiresAt.toISOString() });
   });
 
-  /**
-   * Media rooms need a live match, and this service has no matches table —
-   * random rooms are deliberately not persisted. Until the SFU and the
-   * gateway's match registry exist, this says so rather than issuing a token
-   * for a room nobody is in.
-   */
   app.post("/v1/media/room-token", async (request, reply) => {
-    await requireProfile(request);
-    const parsed = z.object({
-      matchId: z.string().min(1).max(120),
-      kind: z.enum(["voice", "video"]),
-    }).safeParse(request.body);
+    const viewer = await requireProfile(request);
+    const parsed = z
+      .object({
+        matchId: z.string().uuid(),
+        kind: z.enum(["voice", "video"]),
+      })
+      .safeParse(request.body);
     if (!parsed.success) throw ApiError.badRequest("invalid_room", "Could not join that room.");
 
-    void reply;
-    throw ApiError.unavailable("Voice and video rooms are not connected yet.");
+    const profile = await queryOne<{ name: string }>("select name from profiles where id = $1", [viewer.profileId]);
+    if (!profile) throw ApiError.forbidden("Finish setting up your profile first.");
+
+    const roomName = `${parsed.data.kind}-${parsed.data.matchId}`;
+    const issued = issueLiveKitToken({
+      identity: viewer.profileId,
+      name: profile.name,
+      roomName,
+      canPublish: true,
+      ttlSeconds: 300,
+    });
+    return send(reply, 200, issued);
   });
 }
 
-/**
- * Internal: the realtime gateway exchanges a handshake token for an account id.
- *
- * Guarded by a shared key rather than a session, because the caller is a
- * service. Tokens are single use: consuming one here means a captured token
- * cannot be replayed by a second connection.
- */
 export async function internalRoutes(app: FastifyInstance): Promise<void> {
   app.post("/v1/internal/realtime/introspect", async (request, reply) => {
     const presented = request.headers["x-internal-key"];
@@ -69,15 +64,30 @@ export async function internalRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const parsed = z.object({ token: z.string().min(20) }).safeParse(request.body);
-    if (!parsed.success) return send(reply, 200, { accountId: null, blocked: true });
+    if (!parsed.success) {
+      return send(reply, 200, {
+        accountId: null,
+        profileId: null,
+        blocked: true,
+        blockedProfileIds: [],
+        plan: "free",
+      });
+    }
 
     const row = await queryOne<{ id: string; account_id: string }>(
-      `update realtime_tokens set consumed_at = now()
-        where token_hash = $1 and consumed_at is null and expires_at > now()
-        returning id, account_id`,
+      `select id, account_id from realtime_tokens
+        where token_hash = $1 and consumed_at is null and expires_at > now()`,
       [hashToken(parsed.data.token)],
     );
-    if (!row) return send(reply, 200, { accountId: null, blocked: true });
+    if (!row) {
+      return send(reply, 200, {
+        accountId: null,
+        profileId: null,
+        blocked: true,
+        blockedProfileIds: [],
+        plan: "free",
+      });
+    }
 
     const banned = await queryOne<{ id: string }>(
       `select id from moderation_actions
@@ -85,6 +95,66 @@ export async function internalRoutes(app: FastifyInstance): Promise<void> {
           and (expires_at is null or expires_at > now()) limit 1`,
       [row.account_id],
     );
-    return send(reply, 200, { accountId: row.account_id, blocked: Boolean(banned) });
+
+    const profile = await queryOne<{ id: string }>("select id from profiles where account_id = $1", [row.account_id]);
+    const blocks = profile
+      ? await query<{ blocked_profile_id: string }>(
+          `select blocked_profile_id as blocked_profile_id from blocks where blocker_profile_id = $1
+           union
+           select blocker_profile_id as blocked_profile_id from blocks where blocked_profile_id = $1`,
+          [profile.id],
+        )
+      : [];
+
+    const sub = await queryOne<{ plan: string; status: string }>(
+      "select plan, status from subscriptions where account_id = $1",
+      [row.account_id],
+    );
+    const plan =
+      sub && (sub.status === "active" || sub.status === "trialing") && (sub.plan === "plus" || sub.plan === "pro")
+        ? sub.plan
+        : "free";
+
+    return send(reply, 200, {
+      accountId: row.account_id,
+      profileId: profile?.id ?? null,
+      blocked: Boolean(banned),
+      blockedProfileIds: blocks.map((b) => b.blocked_profile_id),
+      plan,
+    });
+  });
+
+  app.post("/v1/internal/reports", async (request, reply) => {
+    const presented = request.headers["x-internal-key"];
+    if (!env.INTERNAL_API_KEY || typeof presented !== "string" || !safeEqual(presented, env.INTERNAL_API_KEY)) {
+      throw ApiError.unauthorized("Not authorised.");
+    }
+
+    const parsed = z
+      .object({
+        accountId: z.string().uuid(),
+        subjectProfileId: z.string().uuid().optional(),
+        matchId: z.string().min(1).max(120).optional(),
+        reason: z.enum(["harassment", "sexual-content", "hate", "spam", "minor-safety", "other"]),
+        details: z.string().trim().max(500).optional(),
+      })
+      .safeParse(request.body);
+    if (!parsed.success) throw ApiError.badRequest("invalid_report", "Could not record that report.");
+
+    const { accountId, subjectProfileId, matchId, reason, details } = parsed.data;
+    const report = await queryOne<{ id: string }>(
+      `insert into reports (reporter_account_id, subject_profile_id, match_id, reason, details)
+       values ($1, $2, $3, $4, $5) returning id`,
+      [accountId, subjectProfileId ?? null, matchId ?? null, reason, details ?? null],
+    );
+    await query(`insert into outbox (topic, payload) values ('report.created', $1)`, [
+      JSON.stringify({ reportId: report!.id, reason, accountId, matchId }),
+    ]);
+    if (reason === "minor-safety") {
+      await query(`insert into outbox (topic, payload) values ('report.escalate', $1)`, [
+        JSON.stringify({ reportId: report!.id, reason, accountId }),
+      ]);
+    }
+    return send(reply, 200, { id: report!.id });
   });
 }

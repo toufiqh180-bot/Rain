@@ -1,13 +1,14 @@
 import { env } from "./env.js";
 import { pool } from "./db.js";
 import { buildApp } from "./app.js";
+import { startOutboxWorker } from "./outbox-worker.js";
 
 const app = await buildApp();
+const stopOutbox = startOutboxWorker();
 
 const shutdown = async (signal: string) => {
   app.log.info({ event: "shutting_down", signal });
-  // Stop accepting connections, let in-flight requests finish, then release the
-  // pool. A hard exit here would drop a half-written transaction.
+  stopOutbox();
   await app.close().catch(() => undefined);
   await pool.end().catch(() => undefined);
   process.exit(0);

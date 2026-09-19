@@ -22,19 +22,31 @@ export type QueuePreferences = z.infer<typeof queuePreferencesSchema>;
 export type ChatMessage = z.infer<typeof chatMessageSchema>;
 export type Report = z.infer<typeof reportSchema>;
 
+export type MatchPayload = {
+  matchId: string;
+  sharedInterests: string[];
+  /** Peer's public profile id so either side can send a friend request. */
+  peerProfileId: string | null;
+};
+
 export type ClientToServerEvents = {
   joinQueue: (preferences: QueuePreferences) => void;
   leaveQueue: () => void;
   next: () => void;
   message: (message: ChatMessage) => void;
   reportPeer: (report: Report) => void;
+  /** Explicit mutual consent before media rooms open. */
+  mediaReady: (input: { matchId: string; kind: "voice" | "video" }) => void;
+  mediaLeave: (input: { matchId: string }) => void;
 };
 
 export type ServerToClientEvents = {
   queueJoined: () => void;
-  matched: (match: { matchId: string; sharedInterests: string[] }) => void;
+  matched: (match: MatchPayload) => void;
   message: (message: ChatMessage & { sequence: number; sentAt: string }) => void;
   peerLeft: () => void;
   queueError: (error: { code: string; message: string }) => void;
   reported: () => void;
+  mediaPeerReady: (input: { matchId: string; kind: "voice" | "video" }) => void;
+  mediaBothReady: (input: { matchId: string; kind: "voice" | "video" }) => void;
 };

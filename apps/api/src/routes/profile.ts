@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
+import { env } from "../env.js";
 import { query, queryOne, transaction } from "../db.js";
 import { ApiError, send } from "../http.js";
 import { handleFrom, verifyPassword } from "../security.js";
@@ -78,6 +79,14 @@ export async function profileRoutes(app: FastifyInstance): Promise<void> {
     const parsed = draft.safeParse(request.body);
     if (!parsed.success) throw ApiError.badRequest("invalid_profile", "Check your profile details.");
     const { name, bio, identity, seeking, interests: chosen } = parsed.data;
+
+    await query(
+      `update accounts set age_gate_accepted_at = coalesce(age_gate_accepted_at, now()),
+                          age_gate_version = coalesce(age_gate_version, $2),
+                          updated_at = now()
+        where id = $1`,
+      [viewer.accountId, env.TERMS_VERSION],
+    );
 
     // The handle carries a random suffix, so a collision is rare — but the
     // unique index is the authority, and we retry rather than fail the signup.

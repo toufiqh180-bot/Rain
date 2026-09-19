@@ -9,8 +9,9 @@ export const CSRF_COOKIE = "rain_csrf";
 
 export type Viewer = {
   accountId: string;
-  email: string;
+  email: string | null;
   emailVerified: boolean;
+  isGuest: boolean;
   sessionId: string;
   profileId: string | null;
 };
@@ -56,8 +57,9 @@ export async function revokeAllSessions(accountId: string): Promise<void> {
 type SessionRow = {
   session_id: string;
   account_id: string;
-  email: string;
+  email: string | null;
   email_verified: boolean;
+  is_guest: boolean;
   csrf_token: string;
   profile_id: string | null;
 };
@@ -67,7 +69,8 @@ async function lookup(request: FastifyRequest): Promise<{ viewer: Viewer; csrf: 
   if (!token) return null;
 
   const row = await queryOne<SessionRow>(
-    `select s.id as session_id, s.csrf_token, a.id as account_id, a.email, a.email_verified, p.id as profile_id
+    `select s.id as session_id, s.csrf_token, a.id as account_id, a.email, a.email_verified,
+            a.is_guest, p.id as profile_id
        from sessions s
        join accounts a on a.id = s.account_id
        left join profiles p on p.account_id = a.id
@@ -84,6 +87,7 @@ async function lookup(request: FastifyRequest): Promise<{ viewer: Viewer; csrf: 
       accountId: row.account_id,
       email: row.email,
       emailVerified: row.email_verified,
+      isGuest: row.is_guest,
       sessionId: row.session_id,
       profileId: row.profile_id,
     },
