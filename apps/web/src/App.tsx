@@ -293,33 +293,50 @@ export default function App() {
 /* ------------------------------------------------------------------ auth -- */
 
 function Auth({ onBack, onAuthenticated }: { onBack: () => void; onAuthenticated: (session: Session) => void }) {
-  const [mode, setMode] = useState<"signup" | "signin">("signup");
+  const [mode, setMode] = useState<"signup" | "signin" | "guest">("signup");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [accepted, setAccepted] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [guestUsername, setGuestUsername] = useState("");
+  const [guestGender, setGuestGender] = useState("Prefer not to say");
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
-    const normalized = email.trim().toLowerCase();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) return setError("Enter a valid email address.");
-    if (password.length < 12) return setError("Use at least 12 characters.");
-    if (mode === "signup" && password !== confirmPassword) return setError("Passwords do not match.");
-    if (mode === "signup" && !accepted) return setError("Confirm you are 18 or older.");
-
     setSubmitting(true);
+
     try {
-      const session =
-        mode === "signup"
-          ? await auth.signUp({ email: normalized, password, acceptedTerms: accepted })
-          : await auth.signIn({ email: normalized, password });
-      // Clear the secrets from component state the moment they are no longer needed.
-      setPassword("");
-      setConfirmPassword("");
-      onAuthenticated(session);
+      if (mode === "guest") {
+        // Guest login (light onboarding)
+        if (!guestUsername.trim()) return setError("Choose a username.");
+        if (!accepted) return setError("Confirm you are 18 or older.");
+        const session = await auth.guest({ 
+          username: guestUsername.trim(), 
+          gender: guestGender,
+          acceptedTerms: true,
+          acceptedAgeGate: true,
+        });
+        onAuthenticated(session);
+      } else {
+        // Regular email signup/signin
+        const normalized = email.trim().toLowerCase();
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) return setError("Enter a valid email address.");
+        if (password.length < 12) return setError("Use at least 12 characters.");
+        if (mode === "signup" && password !== confirmPassword) return setError("Passwords do not match.");
+        if (mode === "signup" && !accepted) return setError("Confirm you are 18 or older.");
+
+        const session =
+          mode === "signup"
+            ? await auth.signUp({ email: normalized, password, acceptedTerms: accepted })
+            : await auth.signIn({ email: normalized, password });
+        // Clear the secrets from component state the moment they are no longer needed.
+        setPassword("");
+        setConfirmPassword("");
+        onAuthenticated(session);
+      }
     } catch (reason) {
       setError(messageFor(reason));
     } finally {
@@ -338,35 +355,82 @@ function Auth({ onBack, onAuthenticated }: { onBack: () => void; onAuthenticated
       </header>
 
       <section className="auth__card">
-        <h1>{mode === "signup" ? <>Enter <em>Rain.</em></> : <>Welcome <em>back.</em></>}</h1>
+        <h1>
+          {mode === "guest" ? <>Join as <em>guest.</em></> : mode === "signup" ? <>Enter <em>Rain.</em></> : <>Welcome <em>back.</em></>}
+        </h1>
 
         <div className="auth__tabs" role="tablist">
-          <button role="tab" aria-selected={mode === "signup"} className={mode === "signup" ? "is-active" : undefined} onClick={() => { setMode("signup"); setError(null); }}>Create account</button>
-          <button role="tab" aria-selected={mode === "signin"} className={mode === "signin" ? "is-active" : undefined} onClick={() => { setMode("signin"); setError(null); }}>Sign in</button>
+          <button role="tab" aria-selected={mode === "guest"} className={mode === "guest" ? "is-active" : undefined} onClick={() => { setMode("guest"); setError(null); }}>
+            Quick join
+          </button>
+          <button role="tab" aria-selected={mode === "signup"} className={mode === "signup" ? "is-active" : undefined} onClick={() => { setMode("signup"); setError(null); }}>
+            Create account
+          </button>
+          <button role="tab" aria-selected={mode === "signin"} className={mode === "signin" ? "is-active" : undefined} onClick={() => { setMode("signin"); setError(null); }}>
+            Sign in
+          </button>
         </div>
 
         <form onSubmit={(event) => void submit(event)} noValidate>
-          <label htmlFor="auth-email">Email</label>
-          <input id="auth-email" type="email" inputMode="email" autoComplete="email" required value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" />
-
-          <label htmlFor="auth-password">Password</label>
-          <input id="auth-password" type="password" required minLength={12} autoComplete={mode === "signup" ? "new-password" : "current-password"} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="12+ characters" />
-
-          {mode === "signup" && (
+          {mode === "guest" ? (
             <>
-              <label htmlFor="auth-confirm">Confirm password</label>
-              <input id="auth-confirm" type="password" required minLength={12} autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} placeholder="Repeat password" />
+              <p className="auth__note">
+                <strong>Light onboarding:</strong> Join with a username and gender preference. You'll be able to match and chat immediately. Your account deletes when you log out.
+              </p>
+              <label htmlFor="guest-username">Username</label>
+              <input 
+                id="guest-username" 
+                type="text" 
+                autoFocus
+                maxLength={24}
+                required 
+                value={guestUsername} 
+                onChange={(event) => setGuestUsername(event.target.value)} 
+                placeholder="2–24 characters" 
+              />
+
+              <label htmlFor="guest-gender">You are</label>
+              <select 
+                id="guest-gender"
+                value={guestGender} 
+                onChange={(event) => setGuestGender(event.target.value)}
+              >
+                <option>Woman</option>
+                <option>Man</option>
+                <option>Nonbinary</option>
+                <option>Prefer not to say</option>
+              </select>
+
               <label className="auth__accept">
                 <input type="checkbox" checked={accepted} onChange={(event) => setAccepted(event.target.checked)} />
                 <span>I am 18 or older and accept the Terms and Privacy Policy.</span>
               </label>
+            </>
+          ) : (
+            <>
+              <label htmlFor="auth-email">Email</label>
+              <input id="auth-email" type="email" inputMode="email" autoComplete="email" required value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" />
+
+              <label htmlFor="auth-password">Password</label>
+              <input id="auth-password" type="password" required minLength={12} autoComplete={mode === "signup" ? "new-password" : "current-password"} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="12+ characters" />
+
+              {mode === "signup" && (
+                <>
+                  <label htmlFor="auth-confirm">Confirm password</label>
+                  <input id="auth-confirm" type="password" required minLength={12} autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} placeholder="Repeat password" />
+                  <label className="auth__accept">
+                    <input type="checkbox" checked={accepted} onChange={(event) => setAccepted(event.target.checked)} />
+                    <span>I am 18 or older and accept the Terms and Privacy Policy.</span>
+                  </label>
+                </>
+              )}
             </>
           )}
 
           {error && <p className="auth__error" role="alert">{error}</p>}
 
           <button className="button button--light" type="submit" disabled={submitting}>
-            {submitting ? "Please wait" : mode === "signup" ? "Create account" : "Sign in"}
+            {submitting ? "Please wait" : mode === "guest" ? "Join as guest" : mode === "signup" ? "Create account" : "Sign in"}
             <Icon name="arrow" size={16} />
           </button>
         </form>

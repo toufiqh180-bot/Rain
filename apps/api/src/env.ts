@@ -62,6 +62,17 @@ const schema = z.object({
 
   /** Base URL the gateway uses when posting peer reports into the API. */
   PUBLIC_API_URL: z.string().url().optional(),
+
+  /** hCaptcha for signup and guest join protection. Production requires this. */
+  HCAPTCHA_SECRET: z.string().optional(),
+  HCAPTCHA_SITE_KEY: z.string().optional(),
+
+  /** Device reputation and abuse thresholds */
+  REQUIRE_CAPTCHA_ON_SIGNUP: z.coerce.boolean().default(false),
+  DEVICE_REPUTATION_ENABLED: z.coerce.boolean().default(true),
+  MAX_MATCHES_PER_HOUR: z.coerce.number().int().min(5).default(30),
+  MAX_MESSAGES_PER_MINUTE: z.coerce.number().int().min(1).default(20),
+  MAX_CONNECTIONS_PER_DAY: z.coerce.number().int().min(1).default(50),
 }).superRefine((environment, context) => {
   const require = (path: string, message: string) =>
     context.addIssue({ code: "custom", path: [path], message });
@@ -79,6 +90,9 @@ const schema = z.object({
   }
   if (environment.DATABASE_SSL !== "require") {
     require("DATABASE_SSL", "Production requires DATABASE_SSL=require.");
+  }
+  if (!environment.HCAPTCHA_SECRET || !environment.HCAPTCHA_SITE_KEY) {
+    require("HCAPTCHA_SECRET", "Production requires HCAPTCHA_SECRET and HCAPTCHA_SITE_KEY for abuse prevention.");
   }
 });
 
@@ -104,3 +118,4 @@ export const billingConfigured = Boolean(
 );
 export const emailConfigured = Boolean(env.RESEND_API_KEY && env.EMAIL_FROM);
 export const livekitConfigured = Boolean(env.LIVEKIT_URL && env.LIVEKIT_API_KEY && env.LIVEKIT_API_SECRET);
+export const captchaConfigured = Boolean(env.HCAPTCHA_SECRET && env.HCAPTCHA_SITE_KEY);

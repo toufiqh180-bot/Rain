@@ -205,6 +205,14 @@ export const auth = {
     return request<Session>("/v1/auth/sign-in", { method: "POST", body: input });
   },
 
+  /**
+   * Guest join: light onboarding, temporary account.
+   * Deleted immediately on sign-out.
+   */
+  guest(input: { username: string; gender: string; acceptedTerms: boolean; acceptedAgeGate: boolean }) {
+    return request<Session>("/v1/auth/guest", { method: "POST", body: input });
+  },
+
   /** Revokes the session server-side. The cookie is cleared by the response. */
   signOut() {
     return request<void>("/v1/auth/sign-out", { method: "POST" });

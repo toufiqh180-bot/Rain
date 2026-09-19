@@ -7,18 +7,27 @@ import { sendEmail } from "../mail.js";
 import { createToken, hashPassword, hashToken, needsRehash, verifyPassword, handleFrom } from "../security.js";
 import { issueSession, requireViewer, revokeAllSessions, revokeSession, optionalViewer, CSRF_COOKIE, SESSION_COOKIE } from "../session.js";
 import { serialiseProfile, type ProfileRow } from "./profile.js";
+import { verifyCaptcha, generateDeviceFingerprint, assessDeviceRisk } from "../captcha.js";
+import { checkAbuseStatus, logAbuseEvent, recordDevice, scheduleGuestDeletion, checkRateLimit } from "../abuse-prevention.js";
 
 const credentials = z.object({
   email: z.string().trim().toLowerCase().email(),
   password: z.string().min(12).max(200),
 });
-const signUpBody = credentials.extend({ acceptedTerms: z.literal(true), acceptedAgeGate: z.literal(true).optional() });
+const signUpBody = credentials.extend({ 
+  acceptedTerms: z.literal(true), 
+  acceptedAgeGate: z.literal(true).optional(),
+  captchaToken: z.string().optional(),
+  deviceFingerprint: z.string().optional(),
+});
 
 const guestBody = z.object({
   username: z.string().trim().min(2).max(24),
   gender: z.string().trim().min(1).max(40),
   acceptedTerms: z.literal(true),
   acceptedAgeGate: z.literal(true),
+  captchaToken: z.string().optional(),
+  deviceFingerprint: z.string().optional(),
 });
 
 const MAX_FAILURES = 8;
@@ -103,7 +112,25 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     if (!parsed.success) {
       throw ApiError.badRequest("invalid_guest", "Enter a username and gender, and confirm you are 18+.");
     }
-    const { username, gender } = parsed.data;
+    const { username, gender, captchaToken, deviceFingerprint } = parsed.data;
+
+    // Verify CAPTCHA in production
+    if (env.REQUIRE_CAPTCHA_ON_SIGNUP && captchaToken) {
+      const captchaValid = await verifyCaptcha(captchaToken, request.ip);
+      if (!captchaValid) {
+        await logAbuseEvent("captcha_failed_guest", null, { ip: request.ip });
+        throw ApiError.badRequest("captcha_failed", "CAPTCHA verification failed. Try again.");
+      }
+    }
+
+    // Check device reputation
+    if (env.DEVICE_REPUTATION_ENABLED && deviceFingerprint) {
+      const riskScore = await assessDeviceRisk(request.ip, deviceFingerprint, query);
+      if (riskScore >= 2) {
+        await logAbuseEvent("device_blocked_guest_join", null, { ip: request.ip, fingerprint: deviceFingerprint });
+        throw ApiError.forbidden("Your device cannot join at this time. Contact support if this is an error.");
+      }
+    }
 
     const accountId = await transaction(async (client) => {
       const inserted = await client.query<{ id: string }>(
@@ -130,9 +157,19 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       }
       if (!profileId) throw ApiError.conflict("handle_unavailable", "Could not reserve that username. Try another.");
 
+      // Record device fingerprint for future checks
+      if (deviceFingerprint) {
+        await client.query(
+          `insert into device_fingerprints (account_id, fingerprint, user_agent, ip, risk_score)
+           values ($1, $2, $3, $4, 0)
+           on conflict do nothing`,
+          [id, deviceFingerprint, request.headers["user-agent"] ?? null, request.ip],
+        );
+      }
+
       await client.query("insert into audit_log (account_id, action, metadata) values ($1, 'guest.created', $2)", [
         id,
-        JSON.stringify({ ip: request.ip, termsVersion: env.TERMS_VERSION }),
+        JSON.stringify({ ip: request.ip, termsVersion: env.TERMS_VERSION, deviceFingerprint }),
       ]);
       return id;
     });
@@ -148,7 +185,25 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         password: "Use at least 12 characters.",
       });
     }
-    const { email, password, acceptedAgeGate } = parsed.data;
+    const { email, password, acceptedAgeGate, captchaToken, deviceFingerprint } = parsed.data;
+
+    // Verify CAPTCHA in production
+    if (env.REQUIRE_CAPTCHA_ON_SIGNUP && captchaToken) {
+      const captchaValid = await verifyCaptcha(captchaToken, request.ip);
+      if (!captchaValid) {
+        await logAbuseEvent("captcha_failed_signup", null, { ip: request.ip, email });
+        throw ApiError.badRequest("captcha_failed", "CAPTCHA verification failed. Try again.");
+      }
+    }
+
+    // Check device reputation
+    if (env.DEVICE_REPUTATION_ENABLED && deviceFingerprint) {
+      const riskScore = await assessDeviceRisk(request.ip, deviceFingerprint, query);
+      if (riskScore >= 2) {
+        await logAbuseEvent("device_blocked_signup", null, { ip: request.ip, fingerprint: deviceFingerprint });
+        throw ApiError.forbidden("Your device cannot sign up at this time. Contact support if this is an error.");
+      }
+    }
 
     const passwordHash = await hashPassword(password);
     const accountId = await transaction(async (client) => {
@@ -170,9 +225,20 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       );
       const id = inserted.rows[0].id;
       await client.query("insert into subscriptions (account_id) values ($1)", [id]);
+      
+      // Record device fingerprint for future checks
+      if (deviceFingerprint) {
+        await client.query(
+          `insert into device_fingerprints (account_id, fingerprint, user_agent, ip, risk_score)
+           values ($1, $2, $3, $4, 0)
+           on conflict do nothing`,
+          [id, deviceFingerprint, request.headers["user-agent"] ?? null, request.ip],
+        );
+      }
+      
       await client.query("insert into audit_log (account_id, action, metadata) values ($1, 'account.created', $2)", [
         id,
-        JSON.stringify({ termsVersion: env.TERMS_VERSION, ip: request.ip }),
+        JSON.stringify({ termsVersion: env.TERMS_VERSION, ip: request.ip, deviceFingerprint }),
       ]);
       return id;
     });
@@ -240,9 +306,14 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.post("/v1/auth/sign-out", async (request, reply) => {
     const viewer = await requireViewer(request);
     if (viewer.isGuest) {
+      // Schedule immediate guest account deletion; the cleanup worker will hard-delete
+      await scheduleGuestDeletion(viewer.accountId, "logout");
+      // Also hard-delete now to ensure immediate cleanup
       await destroyGuestAccount(viewer.accountId);
       reply.clearCookie(SESSION_COOKIE, { path: "/", domain: env.COOKIE_DOMAIN, sameSite: "lax" });
       reply.clearCookie(CSRF_COOKIE, { path: "/", domain: env.COOKIE_DOMAIN, sameSite: "lax" });
+      // Log the guest deletion for audit trail
+      await query("insert into audit_log (account_id, action) values ($1, 'guest.deleted')", [viewer.accountId]);
       return send(reply, 204);
     }
     await revokeSession(reply, viewer.sessionId);
