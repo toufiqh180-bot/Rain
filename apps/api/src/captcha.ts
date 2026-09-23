@@ -9,7 +9,7 @@ export async function verifyCaptcha(token: string, remoteIp: string): Promise<bo
   if (!env.HCAPTCHA_SECRET) {
     // Captcha not configured; skip verification in development.
     if (env.NODE_ENV !== "production") return true;
-    throw ApiError.unavailable("Captcha verification unavailable.");
+    throw ApiError.unavailable("Captcha verification unavailable. Please contact support.");
   }
 
   try {
