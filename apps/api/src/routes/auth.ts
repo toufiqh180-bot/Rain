@@ -8,7 +8,7 @@ import { createToken, hashPassword, hashToken, needsRehash, verifyPassword, hand
 import { issueSession, requireViewer, revokeAllSessions, revokeSession, optionalViewer, CSRF_COOKIE, SESSION_COOKIE } from "../session.js";
 import { serialiseProfile, type ProfileRow } from "./profile.js";
 import { verifyCaptcha, generateDeviceFingerprint, assessDeviceRisk } from "../captcha.js";
-import { checkAbuseStatus, logAbuseEvent, recordDevice, scheduleGuestDeletion, checkRateLimit } from "../abuse-prevention.js";
+import { checkAbuseStatus, logAbuseEvent, recordDevice, checkRateLimit } from "../abuse-prevention.js";
 
 const credentials = z.object({
   email: z.string().trim().toLowerCase().email(),
@@ -306,13 +306,10 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.post("/v1/auth/sign-out", async (request, reply) => {
     const viewer = await requireViewer(request);
     if (viewer.isGuest) {
-      // Schedule immediate guest account deletion; the cleanup worker will hard-delete
-      await scheduleGuestDeletion(viewer.accountId, "logout");
-      // Also hard-delete now to ensure immediate cleanup
+      // Guest accounts are intentionally one-time. Delete immediately on logout.
       await destroyGuestAccount(viewer.accountId);
       reply.clearCookie(SESSION_COOKIE, { path: "/", domain: env.COOKIE_DOMAIN, sameSite: "lax" });
       reply.clearCookie(CSRF_COOKIE, { path: "/", domain: env.COOKIE_DOMAIN, sameSite: "lax" });
-      // Log the guest deletion for audit trail
       await query("insert into audit_log (account_id, action) values ($1, 'guest.deleted')", [viewer.accountId]);
       return send(reply, 204);
     }
@@ -402,7 +399,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     if (!parsed.success) throw ApiError.badRequest("invalid_token", "That verification link is no longer valid.");
     const row = await queryOne<{ id: string; account_id: string }>(
       `select id, account_id from account_tokens
-        where token_hash = $1 and purpose = 'email_verify' and consumed_at is null and expires_at > now()`,
+        where token_hash = $1 and purpose = 'email_verify' and consumed_at = null and expires_at > now()`,
       [hashToken(parsed.data.token)],
     );
     if (!row) throw ApiError.badRequest("invalid_token", "That verification link is no longer valid.");

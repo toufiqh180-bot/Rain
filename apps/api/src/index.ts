@@ -2,11 +2,9 @@ import { env } from "./env.js";
 import { pool } from "./db.js";
 import { buildApp } from "./app.js";
 import { startOutboxWorker } from "./outbox-worker.js";
-import { startCleanupWorkerSchedule } from "./cleanup-worker.js";
 
 const app = await buildApp();
 const stopOutbox = startOutboxWorker();
-const stopCleanup = startCleanupWorkerSchedule(5); // Run every 5 minutes
 
 const shutdown = async (signal: string) => {
   app.log.info({ event: "shutting_down", signal });

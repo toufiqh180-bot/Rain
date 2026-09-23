@@ -73,13 +73,13 @@ async function deleteExpiredGuestAccounts(): Promise<void> {
  * Clean up expired CAPTCHA challenges that were never verified.
  */
 async function cleanupExpiredCaptchaChallenges(): Promise<void> {
-  const result = await query<{ count: string }>(
+  const result = await query<{ id: string }>(
     `delete from captcha_challenges 
      where expires_at < now() and verified = false
-     returning count(*)::text as count`,
+     returning id`,
   );
 
-  const deleted = Number(result[0]?.count ?? 0);
+  const deleted = result.length;
   if (deleted > 0) {
     console.log(JSON.stringify({
       event: "captcha_challenges_cleaned",

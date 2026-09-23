@@ -157,14 +157,5 @@ export async function logAbuseEvent(
 
 /**
  * Check if guest account should be auto-deleted after logout.
- * Schedules deletion for cleanup worker to handle.
+ * Guest accounts are deleted immediately on sign-out, so no async queue is needed.
  */
-export async function scheduleGuestDeletion(accountId: string, reason: string): Promise<void> {
-  // Schedule for immediate deletion (worker picks up immediately)
-  await query(
-    `insert into guest_account_cleanup (account_id, scheduled_for, reason)
-     values ($1, now(), $2)
-     on conflict (account_id) do nothing`,
-    [accountId, reason],
-  );
-}
