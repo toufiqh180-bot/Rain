@@ -70,7 +70,7 @@ function peerId(match: ActiveMatch, socketId: string): string {
 
 function allowedToSend(socket: RainSocket): boolean {
   const now = Date.now();
-  const recent = (socket.data.sentAt ?? []).filter((time) => now - time < 5_000);
+  const recent = (socket.data.sentAt ?? []).filter((time: number) => now - time < 5_000);
   if (recent.length >= 10) return false;
   socket.data.sentAt = [...recent, now];
   return true;
