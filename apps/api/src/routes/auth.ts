@@ -7,8 +7,8 @@ import { sendEmail } from "../mail.js";
 import { createToken, hashPassword, hashToken, needsRehash, verifyPassword, handleFrom } from "../security.js";
 import { issueSession, requireViewer, revokeAllSessions, revokeSession, optionalViewer, CSRF_COOKIE, SESSION_COOKIE } from "../session.js";
 import { serialiseProfile, type ProfileRow } from "./profile.js";
-import { verifyCaptcha, generateDeviceFingerprint, assessDeviceRisk } from "../captcha.js";
-import { checkAbuseStatus, logAbuseEvent, recordDevice, checkRateLimit } from "../abuse-prevention.js";
+import { verifyCaptcha, assessDeviceRisk } from "../captcha.js";
+import { logAbuseEvent } from "../abuse-prevention.js";
 
 const credentials = z.object({
   email: z.string().trim().toLowerCase().email(),
@@ -46,6 +46,51 @@ async function tooManyFailures(email: string, ip: string): Promise<boolean> {
 
 async function recordAttempt(email: string, ip: string, succeeded: boolean): Promise<void> {
   await query("insert into login_attempts (email, ip, succeeded) values ($1, $2, $3)", [email, ip, succeeded]);
+}
+
+async function recordDeviceFingerprint(
+  client: { query: typeof query },
+  accountId: string,
+  fingerprint: string | undefined,
+  request: { headers: Record<string, string | string[] | undefined>; ip: string },
+): Promise<void> {
+  if (!fingerprint) return;
+
+  await client.query(
+    `insert into device_fingerprints (account_id, fingerprint, user_agent, ip, risk_score)
+     values ($1, $2, $3, $4, 0)
+     on conflict do nothing`,
+    [accountId, fingerprint, request.headers["user-agent"] ?? null, request.ip],
+  );
+}
+
+async function validateHumanAccess(
+  request: { ip: string; headers: Record<string, string | string[] | undefined> },
+  flow: "signup" | "guest",
+  deviceFingerprint: string | undefined,
+  captchaToken: string | undefined,
+): Promise<void> {
+  if (!env.REQUIRE_CAPTCHA_ON_SIGNUP || !captchaToken) return;
+
+  const captchaValid = await verifyCaptcha(captchaToken, request.ip);
+  if (!captchaValid) {
+    await logAbuseEvent(flow === "guest" ? "captcha_failed_guest" : "captcha_failed_signup", null, {
+      ip: request.ip,
+      ...(deviceFingerprint ? { fingerprint: deviceFingerprint } : {}),
+    });
+    throw ApiError.badRequest("captcha_failed", "CAPTCHA verification failed. Try again.");
+  }
+
+  if (!env.DEVICE_REPUTATION_ENABLED || !deviceFingerprint) return;
+
+  const riskScore = await assessDeviceRisk(request.ip, deviceFingerprint, query);
+  if (riskScore >= 2) {
+    await logAbuseEvent(flow === "guest" ? "device_blocked_guest_join" : "device_blocked_signup", null, {
+      ip: request.ip,
+      fingerprint: deviceFingerprint,
+    });
+    throw ApiError.forbidden("Your device cannot join at this time. Contact support if this is an error.");
+  }
 }
 
 async function sessionPayload(accountId: string) {
@@ -114,23 +159,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     }
     const { username, gender, captchaToken, deviceFingerprint } = parsed.data;
 
-    // Verify CAPTCHA in production
-    if (env.REQUIRE_CAPTCHA_ON_SIGNUP && captchaToken) {
-      const captchaValid = await verifyCaptcha(captchaToken, request.ip);
-      if (!captchaValid) {
-        await logAbuseEvent("captcha_failed_guest", null, { ip: request.ip });
-        throw ApiError.badRequest("captcha_failed", "CAPTCHA verification failed. Try again.");
-      }
-    }
-
-    // Check device reputation
-    if (env.DEVICE_REPUTATION_ENABLED && deviceFingerprint) {
-      const riskScore = await assessDeviceRisk(request.ip, deviceFingerprint, query);
-      if (riskScore >= 2) {
-        await logAbuseEvent("device_blocked_guest_join", null, { ip: request.ip, fingerprint: deviceFingerprint });
-        throw ApiError.forbidden("Your device cannot join at this time. Contact support if this is an error.");
-      }
-    }
+    await validateHumanAccess(request, "guest", deviceFingerprint, captchaToken);
 
     const accountId = await transaction(async (client) => {
       const inserted = await client.query<{ id: string }>(
@@ -157,15 +186,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       }
       if (!profileId) throw ApiError.conflict("handle_unavailable", "Could not reserve that username. Try another.");
 
-      // Record device fingerprint for future checks
-      if (deviceFingerprint) {
-        await client.query(
-          `insert into device_fingerprints (account_id, fingerprint, user_agent, ip, risk_score)
-           values ($1, $2, $3, $4, 0)
-           on conflict do nothing`,
-          [id, deviceFingerprint, request.headers["user-agent"] ?? null, request.ip],
-        );
-      }
+      await recordDeviceFingerprint(client, id, deviceFingerprint, request);
 
       await client.query("insert into audit_log (account_id, action, metadata) values ($1, 'guest.created', $2)", [
         id,
@@ -187,23 +208,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     }
     const { email, password, acceptedAgeGate, captchaToken, deviceFingerprint } = parsed.data;
 
-    // Verify CAPTCHA in production
-    if (env.REQUIRE_CAPTCHA_ON_SIGNUP && captchaToken) {
-      const captchaValid = await verifyCaptcha(captchaToken, request.ip);
-      if (!captchaValid) {
-        await logAbuseEvent("captcha_failed_signup", null, { ip: request.ip, email });
-        throw ApiError.badRequest("captcha_failed", "CAPTCHA verification failed. Try again.");
-      }
-    }
-
-    // Check device reputation
-    if (env.DEVICE_REPUTATION_ENABLED && deviceFingerprint) {
-      const riskScore = await assessDeviceRisk(request.ip, deviceFingerprint, query);
-      if (riskScore >= 2) {
-        await logAbuseEvent("device_blocked_signup", null, { ip: request.ip, fingerprint: deviceFingerprint });
-        throw ApiError.forbidden("Your device cannot sign up at this time. Contact support if this is an error.");
-      }
-    }
+    await validateHumanAccess(request, "signup", deviceFingerprint, captchaToken);
 
     const passwordHash = await hashPassword(password);
     const accountId = await transaction(async (client) => {
@@ -226,15 +231,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       const id = inserted.rows[0].id;
       await client.query("insert into subscriptions (account_id) values ($1)", [id]);
       
-      // Record device fingerprint for future checks
-      if (deviceFingerprint) {
-        await client.query(
-          `insert into device_fingerprints (account_id, fingerprint, user_agent, ip, risk_score)
-           values ($1, $2, $3, $4, 0)
-           on conflict do nothing`,
-          [id, deviceFingerprint, request.headers["user-agent"] ?? null, request.ip],
-        );
-      }
+      await recordDeviceFingerprint(client, id, deviceFingerprint, request);
       
       await client.query("insert into audit_log (account_id, action, metadata) values ($1, 'account.created', $2)", [
         id,
@@ -324,91 +321,111 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         "select id, email from accounts where lower(email) = $1 and deleted_at is null and is_guest = false",
         [parsed.data.email],
       );
-      if (account?.email) {
-        const reset = createToken();
-        await query(
-          `insert into account_tokens (account_id, purpose, token_hash, expires_at)
-           values ($1, 'password_reset', $2, now() + interval '1 hour')`,
-          [account.id, reset.hash],
-        );
-        await sendEmail({
-          to: account.email,
-          subject: "Reset your Rain password",
-          text: `Reset your Rain password with this code:\n\n${reset.token}\n\nIt expires in one hour.`,
-          log: request.log,
-          event: "password_reset_pending",
-          accountId: account.id,
+      if (account) {
+        await transaction(async (client) => {
+          const token = createToken();
+          await client.query(
+            `insert into account_tokens (account_id, purpose, token_hash, expires_at)
+             values ($1, 'password_reset', $2, now() + interval '1 hour')`,
+            [account.id, token.hash],
+          );
+          await sendEmail({
+            to: account.email,
+            subject: "Reset your Rain password",
+            text: `Reset your Rain password with this code:\n\n${token.token}\n\nIt expires in 1 hour.`,
+            log: request.log,
+            event: "password_reset_requested",
+            accountId: account.id,
+          });
         });
       }
+      return send(reply, 204);
     }
-    return send(reply, 204);
+    throw ApiError.badRequest("invalid_email", "Enter a valid email address.");
   });
 
   app.post("/v1/auth/password/reset", async (request, reply) => {
-    const parsed = z
-      .object({ token: z.string().min(20), password: z.string().min(12).max(200) })
-      .safeParse(request.body);
-    if (!parsed.success) throw ApiError.badRequest("invalid_reset", "That reset link is no longer valid.");
+    const parsed = z.object({
+      token: z.string().min(1),
+      password: z.string().min(12).max(200),
+    }).safeParse(request.body);
+    if (!parsed.success) {
+      throw ApiError.badRequest("invalid_payload", "Invalid token or password.");
+    }
+    const { token, password } = parsed.data;
 
-    const row = await queryOne<{ id: string; account_id: string }>(
-      `select id, account_id from account_tokens
-        where token_hash = $1 and purpose = 'password_reset' and consumed_at is null and expires_at > now()`,
-      [hashToken(parsed.data.token)],
+    const accountToken = await queryOne<{
+      account_id: string;
+      purpose: string;
+      expires_at: Date;
+      token_hash: string;
+    }>(
+      `select account_id, purpose, expires_at, token_hash from account_tokens
+        where token_hash = $1 and purpose = 'password_reset'`,
+      [token],
     );
-    if (!row) throw ApiError.badRequest("invalid_reset", "That reset link is no longer valid.");
+    if (!accountToken) throw ApiError.unauthorized("Invalid or expired token.");
 
-    const passwordHash = await hashPassword(parsed.data.password);
+    const now = new Date();
+    if (accountToken.expires_at < now) throw ApiError.unauthorized("Invalid or expired token.");
+
+    const account = await queryOne<{ id: string }>(
+      "select id from accounts where id = $1 and deleted_at is null",
+      [accountToken.account_id],
+    );
+    if (!account) throw ApiError.unauthorized("Invalid or expired token.");
+
     await transaction(async (client) => {
-      await client.query("update account_tokens set consumed_at = now() where id = $1", [row.id]);
       await client.query("update accounts set password_hash = $1, updated_at = now() where id = $2", [
-        passwordHash,
-        row.account_id,
+        await hashPassword(password),
+        account.id,
       ]);
-      await client.query("update sessions set revoked_at = now() where account_id = $1 and revoked_at is null", [
-        row.account_id,
+      await client.query("delete from account_tokens where account_id = $1 and purpose = 'password_reset'", [
+        account.id,
       ]);
-      await client.query("insert into audit_log (account_id, action) values ($1, 'password.reset')", [row.account_id]);
     });
-    return send(reply, 204);
-  });
 
-  app.post("/v1/auth/email/resend", async (request, reply) => {
-    const viewer = await requireViewer(request);
-    if (viewer.isGuest) throw ApiError.forbidden("Guest profiles do not use email.");
-    if (viewer.emailVerified) return send(reply, 204);
-    if (!viewer.email) throw ApiError.badRequest("no_email", "This account has no email.");
-    const verification = createToken();
-    await query(
-      `insert into account_tokens (account_id, purpose, token_hash, expires_at)
-       values ($1, 'email_verify', $2, now() + interval '2 days')`,
-      [viewer.accountId, verification.hash],
-    );
-    await sendEmail({
-      to: viewer.email,
-      subject: "Verify your Rain account",
-      text: `Verify your Rain email with this code:\n\n${verification.token}\n\nIt expires in 2 days.`,
-      log: request.log,
-      event: "email_verification_pending",
-      accountId: viewer.accountId,
-    });
     return send(reply, 204);
   });
 
   app.post("/v1/auth/email/verify", async (request, reply) => {
-    const parsed = z.object({ token: z.string().min(20) }).safeParse(request.body);
-    if (!parsed.success) throw ApiError.badRequest("invalid_token", "That verification link is no longer valid.");
-    const row = await queryOne<{ id: string; account_id: string }>(
-      `select id, account_id from account_tokens
-        where token_hash = $1 and purpose = 'email_verify' and consumed_at = null and expires_at > now()`,
-      [hashToken(parsed.data.token)],
+    const parsed = z.object({ token: z.string().min(1) }).safeParse(request.body);
+    if (!parsed.success) {
+      throw ApiError.badRequest("invalid_token", "Invalid or expired token.");
+    }
+    const { token } = parsed.data;
+
+    const accountToken = await queryOne<{
+      account_id: string;
+      purpose: string;
+      expires_at: Date;
+      token_hash: string;
+    }>(
+      `select account_id, purpose, expires_at, token_hash from account_tokens
+        where token_hash = $1 and purpose = 'email_verify'`,
+      [token],
     );
-    if (!row) throw ApiError.badRequest("invalid_token", "That verification link is no longer valid.");
+    if (!accountToken) throw ApiError.unauthorized("Invalid or expired token.");
+
+    const now = new Date();
+    if (accountToken.expires_at < now) throw ApiError.unauthorized("Invalid or expired token.");
+
+    const account = await queryOne<{ id: string }>(
+      "select id from accounts where id = $1 and deleted_at is null",
+      [accountToken.account_id],
+    );
+    if (!account) throw ApiError.unauthorized("Invalid or expired token.");
+
     await transaction(async (client) => {
-      await client.query("update account_tokens set consumed_at = now() where id = $1", [row.id]);
-      await client.query("update accounts set email_verified = true, updated_at = now() where id = $1", [
-        row.account_id,
+      await client.query(
+        "update accounts set email_verified = true, updated_at = now() where id = $1",
+        [account.id],
+      );
+      await client.query("delete from account_tokens where account_id = $1 and purpose = 'email_verify'", [
+        account.id,
       ]);
     });
+
     return send(reply, 204);
   });
 }

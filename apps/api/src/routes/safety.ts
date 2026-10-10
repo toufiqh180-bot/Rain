@@ -7,7 +7,7 @@ import { requireViewer } from "../session.js";
 const report = z.object({
   matchId: z.string().max(120).optional(),
   profileId: z.string().uuid().optional(),
-  reason: z.enum(["harassment", "sexual-content", "hate", "spam", "minor-safety", "other"]),
+  reason: z.enum(["harassment", "sexual-content", "hate", "spam", "minor-safety", "somehing-else"]),
   details: z.string().trim().max(500).optional(),
 });
 
