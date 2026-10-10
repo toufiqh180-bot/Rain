@@ -1,4 +1,4 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { env } from "../env.js";
 import { query, queryOne } from "../db.js";
@@ -8,6 +8,23 @@ import { createToken, hashToken, safeEqual } from "../security.js";
 import { requireProfile } from "../session.js";
 
 const TOKEN_TTL_SECONDS = 120;
+
+function requireInternalKey(request: FastifyRequest): void {
+  const presented = request.headers["x-internal-key"];
+  if (!env.INTERNAL_API_KEY || typeof presented !== "string" || !safeEqual(presented, env.INTERNAL_API_KEY)) {
+    throw ApiError.unauthorized("Not authorised.");
+  }
+}
+
+function blockedAccountPayload() {
+  return {
+    accountId: null,
+    profileId: null,
+    blocked: true,
+    blockedProfileIds: [],
+    plan: "free",
+  };
+}
 
 export async function realtimeRoutes(app: FastifyInstance): Promise<void> {
   app.post("/v1/realtime/token", async (request, reply) => {
@@ -58,20 +75,11 @@ export async function realtimeRoutes(app: FastifyInstance): Promise<void> {
 
 export async function internalRoutes(app: FastifyInstance): Promise<void> {
   app.post("/v1/internal/realtime/introspect", async (request, reply) => {
-    const presented = request.headers["x-internal-key"];
-    if (!env.INTERNAL_API_KEY || typeof presented !== "string" || !safeEqual(presented, env.INTERNAL_API_KEY)) {
-      throw ApiError.unauthorized("Not authorised.");
-    }
+    requireInternalKey(request);
 
     const parsed = z.object({ token: z.string().min(20) }).safeParse(request.body);
     if (!parsed.success) {
-      return send(reply, 200, {
-        accountId: null,
-        profileId: null,
-        blocked: true,
-        blockedProfileIds: [],
-        plan: "free",
-      });
+      return send(reply, 200, blockedAccountPayload());
     }
 
     const row = await queryOne<{ id: string; account_id: string }>(
@@ -80,13 +88,7 @@ export async function internalRoutes(app: FastifyInstance): Promise<void> {
       [hashToken(parsed.data.token)],
     );
     if (!row) {
-      return send(reply, 200, {
-        accountId: null,
-        profileId: null,
-        blocked: true,
-        blockedProfileIds: [],
-        plan: "free",
-      });
+      return send(reply, 200, blockedAccountPayload());
     }
 
     const banned = await queryOne<{ id: string }>(
@@ -125,10 +127,7 @@ export async function internalRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post("/v1/internal/reports", async (request, reply) => {
-    const presented = request.headers["x-internal-key"];
-    if (!env.INTERNAL_API_KEY || typeof presented !== "string" || !safeEqual(presented, env.INTERNAL_API_KEY)) {
-      throw ApiError.unauthorized("Not authorised.");
-    }
+    requireInternalKey(request);
 
     const parsed = z
       .object({
