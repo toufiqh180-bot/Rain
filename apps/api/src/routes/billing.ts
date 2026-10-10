@@ -100,6 +100,7 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
   app.post("/v1/billing/checkout", async (request, reply) => {
     const viewer = await requireViewer(request);
     if (!billingConfigured) throw ApiError.unavailable("Billing is not connected yet.");
+    if (!viewer.email) throw ApiError.badRequest("no_email", "Add an email address before starting a checkout.");
 
     const parsed = z.object({ plan: z.enum(["plus", "pro"]) }).safeParse(request.body);
     if (!parsed.success) throw ApiError.badRequest("invalid_plan", "Choose a membership to continue.");
@@ -123,6 +124,7 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
   app.post("/v1/billing/portal", async (request, reply) => {
     const viewer = await requireViewer(request);
     if (!billingConfigured) throw ApiError.unavailable("Billing is not connected yet.");
+    if (!viewer.email) throw ApiError.badRequest("no_email", "Add an email address before opening the portal.");
     const customer = await customerFor(viewer.accountId, viewer.email);
     const portal = await stripe<{ url: string }>("billing_portal/sessions", {
       customer,

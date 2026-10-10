@@ -347,3 +347,38 @@ describe("safety", () => {
     assert.equal(queued[0].topic, "report.escalate");
   });
 });
+
+describe("guest accounts", () => {
+  it("hard-deletes the guest account immediately on sign out", async () => {
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/auth/guest",
+      payload: {
+        username: `guest-${randomUUID().slice(0, 6)}`,
+        gender: "Prefer not to say",
+        acceptedTerms: true,
+        acceptedAgeGate: true,
+      },
+    });
+    assert.equal(created.statusCode, 200, created.body);
+
+    const cookieHeader = created.headers["set-cookie"] as string[] | undefined;
+    const jar = readCookies(cookieHeader);
+    const cookies = [...jar].map(([key, value]) => `${key}=${value}`).join("; ");
+    const csrf = jar.get("rain_csrf")!;
+
+    const signOut = await app.inject({
+      method: "POST",
+      url: "/v1/auth/sign-out",
+      headers: { cookie: cookies, "x-rain-csrf": csrf },
+    });
+    assert.equal(signOut.statusCode, 204, signOut.body);
+
+    const replay = await app.inject({ method: "GET", url: "/v1/auth/session", headers: { cookie: cookies } });
+    assert.equal(replay.statusCode, 401);
+
+    const accountId = created.json().account.id;
+    const check = await query<{ id: string }>("select id from accounts where id = $1", [accountId]);
+    assert.equal(check.length, 0, "guest accounts should be permanently deleted on sign-out");
+  });
+});
