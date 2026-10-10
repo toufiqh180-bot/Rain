@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { MemoryMatchmaker } from "./matchmaker.js";
+import { MemoryMatchmaker, compatible, sharedInterests } from "./matchmaker.js";
 
 test("pairs visitors who share an interest and exposes that overlap", async () => {
   const matcher = new MemoryMatchmaker();
@@ -15,6 +15,24 @@ test("does not pair visitors with incompatible selected interests", async () => 
   await matcher.join("first", { language: "en", interests: ["music"] });
   const result = await matcher.join("second", { language: "en", interests: ["sports"] });
   assert.equal(result.state, "queued");
+});
+
+test("still matches users when both interest lists are empty", async () => {
+  const matcher = new MemoryMatchmaker();
+  await matcher.join("first", { language: "en", interests: [] });
+  const result = await matcher.join("second", { language: "en", interests: [] });
+  assert.equal(result.state, "matched");
+  if (result.state === "matched") {
+    assert.deepEqual(result.match.sharedInterests, []);
+    assert.equal(result.peerSocketId, "first");
+  }
+});
+
+test("sharedInterests and compatible reflect the exact overlap rules", () => {
+  assert.deepEqual(sharedInterests({ language: "en", interests: ["music", "travel"] }, { language: "en", interests: ["music", "film"] }), ["music"]);
+  assert.equal(compatible({ language: "en", interests: ["music"] }, { language: "en", interests: ["music"] }), true);
+  assert.equal(compatible({ language: "en", interests: ["music"] }, { language: "en", interests: ["sports"] }), false);
+  assert.equal(compatible({ language: "en", interests: [] }, { language: "en", interests: [] }), true);
 });
 
 test("increments message ordering once per active match", async () => {
